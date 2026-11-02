@@ -2,6 +2,11 @@ cmake_minimum_required(VERSION 3.22.1)
 
 project(stbridge LANGUAGES CXX)
 
+# std::string::data() used for argv requires non-const char* (C++17). Do not rely on
+# whatever default the NDK toolchain happens to pick.
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
 # Prebuilt nodejs-mobile runtime. Downloaded by CI into the gitignored
 # android/nodejs-mobile/ directory; never committed.
 set(LIBNODE_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../../nodejs-mobile/libnode")
