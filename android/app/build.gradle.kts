@@ -9,6 +9,7 @@ val runtimeVersion = System.getenv("RUNTIME_VERSION") ?: "dev"
 android {
     namespace = "com.sol.sillytavern"
     compileSdk = 35
+    ndkVersion = "27.0.12077973"
 
     defaultConfig {
         applicationId = "com.sol.sillytavern"
@@ -19,6 +20,13 @@ android {
 
         ndk {
             abiFilters += "arm64-v8a"
+        }
+
+        externalNativeBuild {
+            cmake {
+                // libnode.so is prebuilt against libc++_shared.so.
+                arguments += "-DANDROID_STL=c++_shared"
+            }
         }
 
         buildConfigField("String", "RUNTIME_VERSION", "\"$runtimeVersion\"")
@@ -59,6 +67,13 @@ android {
 
     buildFeatures {
         buildConfig = true
+    }
+
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
     }
 }
 
