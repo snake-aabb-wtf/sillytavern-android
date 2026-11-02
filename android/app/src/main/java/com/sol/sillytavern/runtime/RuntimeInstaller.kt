@@ -38,41 +38,59 @@ object RuntimeInstaller {
     private const val RUNTIME_DIR_NAME = "runtime"
     private const val TEMP_PREFIX = "runtime.tmp-"
     private const val VERSION_MARKER = ".version"
+    private const val SERVER_DIR_NAME = "server"
     private const val SEED_DIR_NAME = "seed"
     private const val DATA_DIR_NAME = "data"
     private const val BUFFER_SIZE = 64 * 1024
 
+    /** Version strings are also path segments, so keep them to a conservative alphabet. */
+    private val VERSION_PATTERN = Regex("^[0-9A-Za-z][0-9A-Za-z._+-]*$")
+
     /**
      * True when the runtime of [currentVersion] must be (re)installed.
      *
-     * Pure function (no Android APIs) so it can be unit-tested on the JVM: only an exact
-     * match with a non-blank marker skips installation.
+     * This is the single decision used by [ensureInstalled] and by callers that only have
+     * the marker text. Pure function (no Android APIs) so it can be unit-tested on the
+     * JVM: only a non-blank marker whose trimmed text equals [currentVersion] skips
+     * installation.
      */
     fun needsInstall(markerVersion: String?, currentVersion: String): Boolean =
-        markerVersion.isNullOrBlank() || markerVersion != currentVersion
+        markerVersion.isNullOrBlank() || markerVersion.trim() != currentVersion
 
     /**
      * Extracts `assets/[assetName]` into `filesDir/runtime/[version]` and returns
      * [InstallResult.Ready] with that directory.
      *
-     * Re-extraction is skipped when the version already looks complete. Older
-     * `runtime/<other>` directories are removed after a successful install. `data/` is
-     * never touched. Never throws; failures come back as [InstallResult.Failed].
+     * Re-extraction is skipped when that directory already has both `server/` and
+     * `seed/` and its `.version` marker satisfies [needsInstall]. Older
+     * `runtime/<version-looking>` directories are pruned on every successful path; `data/`
+     * is never touched.
+     *
+     * **Blocking I/O:** this performs a full asset extraction and directory rename
+     * synchronously. Call it from a worker thread (`Dispatchers.IO`), never from the main
+     * thread. (androidx `@WorkerThread` is not a dependency, hence this note.)
+     *
+     * Never throws (except `VirtualMachineError`); failures come back as
+     * [InstallResult.Failed].
      */
     fun ensureInstalled(context: Context, assetName: String, version: String): InstallResult {
-        if (version.isBlank()) return InstallResult.Failed("blank runtime version")
+        if (!isValidVersion(version)) {
+            return InstallResult.Failed("invalid runtime version: \"$version\"")
+        }
 
         val filesDir = context.filesDir
         val runtimeRoot = File(filesDir, RUNTIME_DIR_NAME)
         val target = File(runtimeRoot, version)
 
-        if (isComplete(target, version)) {
+        if (isInstalled(target, version)) {
+            // Still prune: an older runtime may linger after a previous crash.
+            pruneOtherVersions(runtimeRoot, version)
             Log.i(TAG, "runtime $version already installed at ${target.path}")
             return InstallResult.Ready(target)
         }
 
         val temp = File(filesDir, TEMP_PREFIX + version)
-        return try {
+        val failure: String? = try {
             // Leftovers from an interrupted install of another version are garbage.
             filesDir.listFiles()
                 ?.filter { it.isDirectory && it.name.startsWith(TEMP_PREFIX) && it.name != temp.name }
@@ -81,36 +99,52 @@ object RuntimeInstaller {
             if (!temp.mkdirs()) throw IOException("cannot create ${temp.path}")
 
             context.assets.open(assetName).use { input -> unzipInto(input, temp) }
+
+            // A truncated or wrong asset must not be promoted to a "ready" runtime.
+            require(File(temp, SERVER_DIR_NAME).isDirectory) {
+                "asset $assetName has no $SERVER_DIR_NAME/ directory"
+            }
+            require(File(temp, SEED_DIR_NAME).isDirectory) {
+                "asset $assetName has no $SEED_DIR_NAME/ directory"
+            }
             File(temp, VERSION_MARKER).writeText(version)
 
             if (!runtimeRoot.isDirectory && !runtimeRoot.mkdirs()) {
                 throw IOException("cannot create ${runtimeRoot.path}")
             }
             // Only reached when the existing target is incomplete or stale.
-            deleteRecursively(target)
+            if (!deleteRecursively(target)) {
+                throw IOException("cannot remove stale runtime ${target.path}")
+            }
             if (!temp.renameTo(target)) {
                 throw IOException("cannot rename ${temp.path} to ${target.path}")
             }
-
-            pruneOtherVersions(runtimeRoot, version)
-            Log.i(TAG, "installed runtime $version at ${target.path}")
-            InstallResult.Ready(target)
+            null
         } catch (t: Throwable) {
             deleteRecursively(temp)
             if (t is VirtualMachineError) throw t
             Log.e(TAG, "failed to install runtime $version from $assetName", t)
-            InstallResult.Failed(
-                "install $version failed: ${t.javaClass.simpleName}: ${t.message ?: "no detail"}",
-            )
+            "install $version failed: ${t.javaClass.simpleName}: ${t.message ?: "no detail"}"
         }
+
+        if (failure != null) return InstallResult.Failed(failure)
+
+        // Outside the install try/catch: a prune problem must not fail a good install.
+        pruneOtherVersions(runtimeRoot, version)
+        Log.i(TAG, "installed runtime $version at ${target.path}")
+        return InstallResult.Ready(target)
     }
 
     /**
      * Copies `[runtimeDir]/seed` to `filesDir/data` when no data directory exists yet.
      *
-     * No-op when `data/` already exists or the runtime ships no seed directory. The copy
-     * is staged in `data.tmp` and renamed into place, so an interrupted seed never leaves
-     * a partial `data/`.
+     * No-op when `data/` already exists (even if it is empty) or the runtime ships no seed
+     * directory. **Callers must seed before creating `data/` themselves**, otherwise
+     * seeding is silently suppressed. The copy is staged in `data.tmp` and renamed into
+     * place, so an interrupted seed never leaves a partial `data/`.
+     *
+     * **Blocking I/O:** performs a full recursive copy synchronously; call from a worker
+     * thread (`Dispatchers.IO`), never from the main thread.
      *
      * @throws IOException when the copy fails; the staged directory is removed first.
      */
@@ -145,10 +179,27 @@ object RuntimeInstaller {
         }
     }
 
-    private fun isComplete(dir: File, version: String): Boolean {
-        if (!dir.isDirectory) return false
+    /** Version strings are path segments: no separators, no `..`, conservative charset. */
+    private fun isValidVersion(version: String): Boolean =
+        version.isNotBlank() &&
+            !version.contains('/') &&
+            !version.contains('\\') &&
+            VERSION_PATTERN.matches(version)
+
+    /**
+     * Installed means: directory present, payload present, and the marker says this
+     * version. Uses [needsInstall] so the unit-tested predicate is the shipped one.
+     */
+    private fun isInstalled(dir: File, version: String): Boolean =
+        dir.isDirectory && hasPayload(dir) && !needsInstall(readMarker(dir), version)
+
+    private fun hasPayload(dir: File): Boolean =
+        File(dir, SERVER_DIR_NAME).isDirectory && File(dir, SEED_DIR_NAME).isDirectory
+
+    /** Marker text, or null when missing/unreadable (both mean "install"). */
+    private fun readMarker(dir: File): String? {
         val marker = File(dir, VERSION_MARKER)
-        return runCatching { marker.isFile && marker.readText().trim() == version }.getOrDefault(false)
+        return runCatching { if (marker.isFile) marker.readText() else null }.getOrNull()
     }
 
     /**
@@ -201,9 +252,15 @@ object RuntimeInstaller {
         }
     }
 
+    /** Removes `runtime/<other-version>` directories; best effort, never throws. */
     private fun pruneOtherVersions(runtimeRoot: File, keep: String) {
         runtimeRoot.listFiles()
-            ?.filter { it.isDirectory && it.name != keep }
+            ?.filter {
+                it.isDirectory &&
+                    it.name != keep &&
+                    !it.name.startsWith(TEMP_PREFIX) &&
+                    VERSION_PATTERN.matches(it.name)
+            }
             ?.forEach { stale ->
                 if (deleteRecursively(stale)) {
                     Log.i(TAG, "removed old runtime ${stale.path}")

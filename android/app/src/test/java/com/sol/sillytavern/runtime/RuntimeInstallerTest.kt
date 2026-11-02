@@ -32,6 +32,13 @@ class RuntimeInstallerTest {
     }
 
     @Test
+    fun markerWithSurroundingWhitespaceSkipsInstall() {
+        // The shipped predicate trims the marker text, so a trailing newline from a
+        // diagnostics dump or shell echo does not force a reinstall.
+        assertFalse(RuntimeInstaller.needsInstall("  $current\n", current))
+    }
+
+    @Test
     fun mismatchedMarkerNeedsInstall() {
         assertTrue(RuntimeInstaller.needsInstall("1.0.1000", current))
     }
