@@ -5,6 +5,7 @@ android/local.properties
 android/nodejs-mobile/
 SillyTavern/node_modules/
 SillyTavern/dist/
+dist/
 *.iml
 .idea/
 HANDOFF.md

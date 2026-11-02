@@ -31,12 +31,14 @@ die() {
 }
 
 resolve_node() {
-    if [[ "$NODE_BIN" == */* ]]; then
-        [[ -x "$NODE_BIN" ]] || die "node binary is not executable: $NODE_BIN"
-    else
-        NODE_BIN="$(command -v "$NODE_BIN" || true)"
-        [[ -n "$NODE_BIN" ]] || die "node not found in PATH"
+    local candidate="$NODE_BIN"
+    if [[ "$candidate" != */* ]]; then
+        candidate="$(command -v "$candidate" || true)"
+        [[ -n "$candidate" ]] || die "node not found in PATH"
     fi
+    [[ -x "$candidate" ]] || die "node binary is not executable: $candidate"
+    # Absolutize: servers/commands are started after `cd` into another directory.
+    NODE_BIN="$(cd "$(dirname "$candidate")" && pwd)/$(basename "$candidate")"
 }
 
 free_port() {
@@ -81,13 +83,10 @@ trap 'exit 130' INT TERM
 resolve_node
 NODE_MAJOR="$("$NODE_BIN" -p 'process.versions.node.split(".")[0]')"
 [[ "$NODE_MAJOR" =~ ^[0-9]+$ ]] || die "cannot determine node major version"
-(( NODE_MAJOR >= 18 )) || die "Node >= 18 required, found $("$NODE_BIN" -v)"
-if (( NODE_MAJOR < 20 )); then
-    printf 'stage-runtime: warning: Node 20+ is recommended for the webpack build (found %s)\n' "$("$NODE_BIN" -v)" >&2
-fi
+(( NODE_MAJOR >= 20 )) || die "Node >= 20 required for the webpack build, found $("$NODE_BIN" -v)"
 printf 'Using Node %s (%s)\n' "$("$NODE_BIN" -v)" "$NODE_BIN"
 
-for tool in npm tar zip curl; do
+for tool in npm tar zip unzip curl; do
     command -v "$tool" >/dev/null 2>&1 || die "required tool not found: $tool"
 done
 [[ -f "$ST_DIR/server.js" ]] || die "SillyTavern sources not found at $ST_DIR"
@@ -167,13 +166,25 @@ if [[ -d "$SERVER_DIR/node_modules/typescript" ]]; then
     die "dev dependencies are still present after npm prune (typescript found)"
 fi
 
+# getCookieSecret() writes cookie-secret.txt on first boot. Shipping it would
+# give every APK the same CSRF/session-signing key, extractable from the asset.
+# heartbeat.json is runtime state, not seed data. content.log is deliberately
+# kept (root + per-user): it records seeded revisions and prevents re-seeding.
+printf '==> Removing per-boot secrets and runtime state from seed\n'
+rm -f -- "$TMP_DATA/cookie-secret.txt" "$TMP_DATA/heartbeat.json"
+
 printf '==> Copying seeded data root to seed/ (webpack cache excluded: it is build-only)\n'
 tar -C "$TMP_DATA" --exclude='./_webpack' -cf - . | tar -C "$SEED_DIR" -xf -
 [[ -s "$SEED_DIR/default-user/settings.json" ]] || die "seed/default-user/settings.json is missing"
+[[ ! -e "$SEED_DIR/cookie-secret.txt" ]] || die "seed/cookie-secret.txt must not ship"
+[[ ! -e "$SEED_DIR/heartbeat.json" ]] || die "seed/heartbeat.json must not ship"
+[[ -f "$SEED_DIR/default-user/content.log" ]] || die "seed/default-user/content.log is missing"
 
 printf '==> Packaging %s (root entries: server/ seed/)\n' "$ZIP_PATH"
 (cd "$STAGE_DIR" && zip -q -r -X "$ZIP_PATH" server seed)
 [[ -s "$ZIP_PATH" ]] || die "runtime.zip was not created"
+unzip -l "$ZIP_PATH" | grep -Eq '[[:space:]]server/$' || die "runtime.zip has no root server/ entry"
+unzip -l "$ZIP_PATH" | grep -Eq '[[:space:]]seed/$' || die "runtime.zip has no root seed/ entry"
 
 printf '\n==> Done\n'
 du -sh "$SERVER_DIR" "$SEED_DIR" "$ZIP_PATH"

@@ -3,20 +3,16 @@
 #
 # Usage:
 #   NODE18=/path/to/node18 bash scripts/smoke-node18.sh dist/runtime
+#   NODE18=/path/to/node18 bash scripts/smoke-node18.sh dist/runtime.zip
 #
-# The staged directory is what stage-runtime.sh produces (server/ + seed/).
+# Accepts either the staged directory (server/ + seed/) or the shipped archive.
+# A .zip is extracted to a throwaway directory, so the real shipped artifact is
+# what gets exercised, not just the pre-zip build tree.
 # The seed is copied to a throwaway data root first, mirroring the app's first
-# launch, so the artifact stays pristine.
+# launch, so the runtime stays pristine.
 set -euo pipefail
 
-RUNTIME_DIR="${1:-}"
-if [[ -z "$RUNTIME_DIR" || ! -d "$RUNTIME_DIR" ]]; then
-    printf 'usage: %s <staged-runtime-dir>  (expected server/ and seed/ inside)\n' "$0" >&2
-    exit 2
-fi
-RUNTIME_DIR="$(cd "$RUNTIME_DIR" && pwd)"
-SERVER_DIR="$RUNTIME_DIR/server"
-SEED_DIR="$RUNTIME_DIR/seed"
+RUNTIME_ARG="${1:-}"
 NODE_BIN="${NODE18:-node}"
 TIMEOUT="${SMOKE_TIMEOUT:-180}"
 PORT_OVERRIDE="${PORT:-}"
@@ -29,13 +25,20 @@ die() {
     exit 1
 }
 
+usage() {
+    printf 'usage: %s <staged-runtime-dir|runtime.zip>  (expected server/ and seed/ inside)\n' "$0" >&2
+    exit 2
+}
+
 resolve_node() {
-    if [[ "$NODE_BIN" == */* ]]; then
-        [[ -x "$NODE_BIN" ]] || die "NODE18 is not executable: $NODE_BIN"
-    else
-        NODE_BIN="$(command -v "$NODE_BIN" || true)"
-        [[ -n "$NODE_BIN" ]] || die "NODE18 not found in PATH"
+    local candidate="$NODE_BIN"
+    if [[ "$candidate" != */* ]]; then
+        candidate="$(command -v "$candidate" || true)"
+        [[ -n "$candidate" ]] || die "NODE18 not found in PATH"
     fi
+    [[ -x "$candidate" ]] || die "NODE18 is not executable: $candidate"
+    # Absolutize: the server is started after `cd "$SERVER_DIR"`.
+    NODE_BIN="$(cd "$(dirname "$candidate")" && pwd)/$(basename "$candidate")"
 }
 
 free_port() {
@@ -78,19 +81,41 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT TERM
 
+[[ -n "$RUNTIME_ARG" ]] || usage
+[[ -e "$RUNTIME_ARG" ]] || die "no such file or directory: $RUNTIME_ARG"
+
+TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/st-smoke.XXXXXX")"
+if [[ -f "$RUNTIME_ARG" ]]; then
+    [[ "$RUNTIME_ARG" == *.zip ]] || die "expected a directory or a .zip archive: $RUNTIME_ARG"
+    command -v unzip >/dev/null 2>&1 || die "unzip is required to smoke a .zip artifact"
+    mkdir -p "$TMP_DIR/runtime"
+    unzip -q "$RUNTIME_ARG" -d "$TMP_DIR/runtime" || die "failed to extract $RUNTIME_ARG"
+    RUNTIME_DIR="$TMP_DIR/runtime"
+else
+    RUNTIME_DIR="$(cd "$RUNTIME_ARG" && pwd)"
+fi
+
+SERVER_DIR="$RUNTIME_DIR/server"
+SEED_DIR="$RUNTIME_DIR/seed"
+
 resolve_node
+command -v curl >/dev/null 2>&1 || die "curl is required but was not found in PATH"
+
 NODE_MAJOR="$("$NODE_BIN" -p 'process.versions.node.split(".")[0]')"
 [[ "$NODE_MAJOR" =~ ^[0-9]+$ ]] || die "cannot determine node major version"
 (( NODE_MAJOR >= 18 )) || die "Node >= 18 required, found $("$NODE_BIN" -v)"
 if (( NODE_MAJOR != 18 )); then
-    printf 'smoke-node18: warning: expected Node 18, running %s (%s)\n' "$NODE_MAJOR" "$("$NODE_BIN" -v)" >&2
+    if [[ "${ALLOW_ANY_NODE:-0}" != "1" ]]; then
+        die "Node 18 required, found $("$NODE_BIN" -v); set ALLOW_ANY_NODE=1 to override"
+    fi
+    printf 'smoke-node18: warning: ALLOW_ANY_NODE=1, running %s\n' "$("$NODE_BIN" -v)" >&2
 fi
 
 [[ -f "$SERVER_DIR/server.js" ]] || die "missing $SERVER_DIR/server.js"
 [[ -f "$SERVER_DIR/public/lib.bundle.js" ]] || die "missing prebuilt $SERVER_DIR/public/lib.bundle.js"
 [[ -d "$SEED_DIR" ]] || die "missing $SEED_DIR (seeded data root)"
+[[ -s "$SEED_DIR/default-user/settings.json" ]] || die "missing seeded $SEED_DIR/default-user/settings.json"
 
-TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/st-smoke.XXXXXX")"
 DATA_DIR="$TMP_DIR/data"
 LOG="$TMP_DIR/server.log"
 COOKIE_JAR="$TMP_DIR/cookies.txt"
@@ -153,7 +178,10 @@ else
     SETTINGS_CODE="$(http_code -X POST "http://127.0.0.1:$PORT/api/settings/get")"
 fi
 
-if [[ ! "$SETTINGS_CODE" =~ ^[0-9]{3}$ ]] || (( 10#$SETTINGS_CODE >= 500 )); then
+# 000 (connection failure) and empty responses must never pass as "not 5xx".
+if [[ ! "$SETTINGS_CODE" =~ ^[0-9]{3}$ ]] \
+    || [[ "$SETTINGS_CODE" == "000" ]] \
+    || (( 10#$SETTINGS_CODE >= 500 )); then
     printf 'smoke-node18: POST /api/settings/get returned %s (expected non-5xx)\n' "${SETTINGS_CODE:-no response}" >&2
     tail -n 100 "$LOG" >&2 || true
     exit 1
