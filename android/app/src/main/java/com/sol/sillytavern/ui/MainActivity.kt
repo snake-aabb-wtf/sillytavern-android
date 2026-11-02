@@ -64,7 +64,14 @@ class MainActivity : ComponentActivity() {
      */
     private val notificationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
-    ) { /* Denied is acceptable: the server still runs, only its notification is hidden. */ }
+    ) { _ ->
+        // Recorded only after the dialog returns: a process death while it is up must not
+        // suppress the prompt forever.
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_NOTIFICATION_PERMISSION_ASKED, true)
+            .apply()
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -112,8 +119,8 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * Asks at most once: the flag is set before launching so an Activity recreation or a
-     * later launch does not re-prompt after a denial.
+     * Asks at most once per install: the flag is written by the result callback, so an
+     * interrupted prompt is asked again on the next launch.
      */
     private fun requestNotificationPermissionIfNeeded() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
@@ -124,7 +131,6 @@ class MainActivity : ComponentActivity() {
         if (granted) return
         val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
         if (prefs.getBoolean(KEY_NOTIFICATION_PERMISSION_ASKED, false)) return
-        prefs.edit().putBoolean(KEY_NOTIFICATION_PERMISSION_ASKED, true).apply()
         notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
     }
 

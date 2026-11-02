@@ -142,9 +142,9 @@ object ServerController {
      * `node::Stop(Environment*)`, and the `Environment` is created inside `node::Start()`,
      * which we call through [NodeBridge.startNode] and which never returns its handle.
      * Stopping the server therefore means terminating the process that hosts it, so this
-     * is called only from [NodeService.onTaskRemoved] right before the process is killed.
-     * Clearing the retained thread/port under this monitor keeps a late [start] from
-     * adopting a thread that is already going away.
+     * is called only from [NodeService]'s quit path (recents swipe or [NodeService.ACTION_STOP]),
+     * immediately before the process is killed. Clearing the retained thread/port under
+     * this monitor keeps a late [start] from adopting a thread that is already going away.
      */
     @Synchronized
     fun stop() {
@@ -305,7 +305,13 @@ object ServerController {
             return
         }
 
-        rememberNode(thread, port)
+        // stop() may have landed while this worker was preparing the thread; publishing and
+        // starting Node after the controller was reset would run node::Start() with
+        // state == Idle and an untracked thread.
+        if (!rememberNode(thread, port, attemptId)) {
+            closeFd(fd)
+            return
+        }
         try {
             thread.start()
         } catch (t: Throwable) {
@@ -409,10 +415,19 @@ object ServerController {
         }
     }
 
+    /**
+     * Publishes the Node thread only while [attemptId] is still current.
+     *
+     * Runs under the [stop] monitor, so a concurrent [stop] either wins here (false is
+     * returned and Node is never started) or follows this call and is tearing the process
+     * down anyway. Must be called immediately before `thread.start()`.
+     */
     @Synchronized
-    private fun rememberNode(thread: Thread, port: Int) {
+    private fun rememberNode(thread: Thread, port: Int, attemptId: Int): Boolean {
+        if (attemptCounter.get() != attemptId) return false
         nodeThread = thread
         nodePort = port
+        return true
     }
 
     @Synchronized

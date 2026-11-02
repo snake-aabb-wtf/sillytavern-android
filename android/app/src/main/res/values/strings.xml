@@ -15,4 +15,5 @@
     <string name="notification_channel_description">保持本地 SillyTavern 服务在后台运行</string>
     <string name="notification_title">SillyTavern 正在运行</string>
     <string name="notification_text">本地服务运行中，点按返回应用</string>
+    <string name="notification_text_failed">服务未能启动，点按查看原因</string>
 </resources>
