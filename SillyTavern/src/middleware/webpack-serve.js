@@ -1,6 +1,7 @@
 import path from 'node:path';
 import webpack from 'webpack';
 import getPublicLibConfig from '../../webpack.config.js';
+import { serverDirectory } from '../server-directory.js'; // ST-ANDROID
 
 export default function getWebpackServeMiddleware() {
     /**
@@ -11,6 +12,11 @@ export default function getWebpackServeMiddleware() {
      * @type {import('express').RequestHandler}
      */
     function devMiddleware(req, res, next) {
+        // ST-ANDROID: the app ships a prebuilt bundle; no git-derived cache hash exists on device
+        if (process.env.ST_SKIP_WEBPACK === '1' && req.method === 'GET' && req.path === '/lib.js') { // ST-ANDROID
+            return res.sendFile('lib.bundle.js', { root: path.join(serverDirectory, 'public') }); // ST-ANDROID
+        } // ST-ANDROID
+
         const publicLibConfig = getPublicLibConfig();
         const outputPath = publicLibConfig.output?.path;
         const outputFile = publicLibConfig.output?.filename;
