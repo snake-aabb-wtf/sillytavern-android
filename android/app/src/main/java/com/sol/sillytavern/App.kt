@@ -3,8 +3,10 @@ package com.sol.sillytavern
 import android.app.Application
 
 /**
- * Placeholder application entry point.
+ * Application entry point.
  *
- * Runtime staging and WebView wiring are added by later tasks.
+ * The embedded server is owned by [com.sol.sillytavern.server.ServerController], a
+ * process-wide idempotent singleton started by MainActivity; this class needs no custom
+ * initialization.
  */
 class App : Application()
