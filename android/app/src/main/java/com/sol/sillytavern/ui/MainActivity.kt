@@ -1,8 +1,11 @@
 package com.sol.sillytavern.ui
 
+import android.Manifest
 import android.content.ActivityNotFoundException
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.view.View
 import android.webkit.WebResourceError
@@ -15,11 +18,14 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.lifecycleScope
 import com.sol.sillytavern.BuildConfig
 import com.sol.sillytavern.R
+import com.sol.sillytavern.server.NodeService
 import com.sol.sillytavern.server.ServerController
 import com.sol.sillytavern.server.ServerState
 import java.io.File
@@ -51,6 +57,14 @@ class MainActivity : ComponentActivity() {
 
     /** Log path from [ServerState.Failed], used by the 查看日志 button. */
     private var lastFailureLogPath: String? = null
+
+    /**
+     * Android 13+ gates the service notification behind a runtime permission. The result is
+     * not needed to start the server, so a denial is simply ignored.
+     */
+    private val notificationPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { /* Denied is acceptable: the server still runs, only its notification is hidden. */ }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -84,7 +98,34 @@ class MainActivity : ComponentActivity() {
             ServerController.state.collect { render(it) }
         }
 
+        requestNotificationPermissionIfNeeded()
+        startServer()
+    }
+
+    /**
+     * Foreground service first, then the controller: the service is what keeps the
+     * Node-bearing process alive once the user leaves the app.
+     */
+    private fun startServer() {
+        ContextCompat.startForegroundService(this, Intent(this, NodeService::class.java))
         ServerController.start(this)
+    }
+
+    /**
+     * Asks at most once: the flag is set before launching so an Activity recreation or a
+     * later launch does not re-prompt after a denial.
+     */
+    private fun requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        val granted = ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.POST_NOTIFICATIONS,
+        ) == PackageManager.PERMISSION_GRANTED
+        if (granted) return
+        val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+        if (prefs.getBoolean(KEY_NOTIFICATION_PERMISSION_ASKED, false)) return
+        prefs.edit().putBoolean(KEY_NOTIFICATION_PERMISSION_ASKED, true).apply()
+        notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
     }
 
     /**
@@ -225,7 +266,7 @@ class MainActivity : ComponentActivity() {
             loadedUrl = null
             firstPaintPending = false
             lastFailureLogPath = null
-            ServerController.start(this)
+            startServer()
         }
     }
 
@@ -255,6 +296,9 @@ class MainActivity : ComponentActivity() {
     private fun isLocalHost(host: String?): Boolean =
         host == "127.0.0.1" || host.equals("localhost", ignoreCase = true)
 
+    // onStop() deliberately leaves NodeService running: Node backs the loaded page and must
+    // survive backgrounding. Teardown happens in NodeService.onTaskRemoved.
+
     override fun onDestroy() {
         splashFallbackJob?.cancel()
         webView.stopLoading()
@@ -264,6 +308,8 @@ class MainActivity : ComponentActivity() {
     }
 
     private companion object {
+        const val PREFS_NAME = "sillytavern_prefs"
+        const val KEY_NOTIFICATION_PERMISSION_ASKED = "notification_permission_asked"
         const val LOG_ACTIVITY_CLASS = "com.sol.sillytavern.ui.LogActivity"
         const val EXTRA_LOG_PATH = "logPath"
         const val NODE_LOG_RELATIVE_PATH = "logs/node.log"

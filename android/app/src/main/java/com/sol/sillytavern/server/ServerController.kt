@@ -136,6 +136,26 @@ object ServerController {
     }
 
     /**
+     * Tears down the tracked Node runtime and returns to [ServerState.Idle].
+     *
+     * Node cannot be un-started in-process: libnode exposes only
+     * `node::Stop(Environment*)`, and the `Environment` is created inside `node::Start()`,
+     * which we call through [NodeBridge.startNode] and which never returns its handle.
+     * Stopping the server therefore means terminating the process that hosts it, so this
+     * is called only from [NodeService.onTaskRemoved] right before the process is killed.
+     * Clearing the retained thread/port under this monitor keeps a late [start] from
+     * adopting a thread that is already going away.
+     */
+    @Synchronized
+    fun stop() {
+        // Invalidate in-flight workers so none of them can re-publish a state after this.
+        attemptCounter.incrementAndGet()
+        _state.value = ServerState.Idle
+        nodeThread = null
+        nodePort = -1
+    }
+
+    /**
      * Polls `http://127.0.0.1:[port]/` until it answers 2xx/3xx, at most [timeoutMs].
      *
      * Suspends on the caller's coroutine; cancellation is observed between probes and the
