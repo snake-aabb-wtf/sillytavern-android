@@ -11,6 +11,14 @@ import { createGitClient } from '../git/client.js';
 
 const gitBackend = getConfigValue('git.backend', 'auto');
 
+// ST-ANDROID: system git is unavailable inside the Android app, block git-only operations
+const ST_MOBILE = process.env.ST_MOBILE === '1'; // ST-ANDROID
+function blockOnMobile(res) { // ST-ANDROID
+    if (!ST_MOBILE) return false; // ST-ANDROID
+    res.status(501).json({ error: '此操作需要系统 git，Android 版不支持' }); // ST-ANDROID
+    return true; // ST-ANDROID
+} // ST-ANDROID
+
 /**
  * @type {Partial<import('simple-git').SimpleGitOptions>}
  */
@@ -168,6 +176,8 @@ router.post('/install', async (request, response) => {
  */
 router.post('/update', async (request, response) => {
     try {
+        if (blockOnMobile(response)) return; // ST-ANDROID
+
         if (typeof request.body.extensionName !== 'string') {
             return response.status(400).send('Bad Request: A valid extensionName is required in the request body.');
         }
@@ -216,6 +226,8 @@ router.post('/update', async (request, response) => {
 
 router.post('/branches', async (request, response) => {
     try {
+        if (blockOnMobile(response)) return; // ST-ANDROID
+
         if (typeof request.body.extensionName !== 'string') {
             return response.status(400).send('Bad Request: A valid extensionName is required in the request body.');
         }
@@ -265,6 +277,8 @@ router.post('/branches', async (request, response) => {
 
 router.post('/switch', async (request, response) => {
     try {
+        if (blockOnMobile(response)) return; // ST-ANDROID
+
         if (typeof request.body.extensionName !== 'string') {
             return response.status(400).send('Bad Request: A valid extensionName is required in the request body.');
         }

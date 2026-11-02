@@ -98,7 +98,7 @@
         "yauzl": "^3.2.1"
     },
     "engines": {
-        "node": ">= 20"
+        "node": ">= 18"
     },
     "overrides": {
         "vectra": {
