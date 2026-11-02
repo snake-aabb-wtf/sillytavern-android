@@ -451,7 +451,7 @@ SAF 取消、写入失败都要 Toast，不静默。
 
 - [ ] **Step 1: 工作流**
 
-步骤：checkout → setup-java 17 → setup-node 20 → 下载 nodejs-mobile 包并解出 libnode → `bash scripts/stage-runtime.sh` → `bash scripts/smoke-node18.sh dist/runtime` → 复制 `runtime.zip` 到 assets → `./gradlew assembleDebug` → `aapt dump badging` 断言包名 → 上传 artifact。
+步骤：checkout → setup-java 17 → setup-node 20 → 下载 nodejs-mobile 包并解出 libnode → `bash scripts/stage-runtime.sh` → `bash scripts/smoke-node18.sh dist/runtime.zip` → 复制 `runtime.zip` 到 assets → `./gradlew assembleDebug` → `aapt dump badging` 断言包名 → 上传 artifact。
 
 - [ ] **Step 2: 缓存**
 
