@@ -38,6 +38,13 @@
             android:layout_marginTop="12dp"
             android:text="@string/settings_import" />
 
+        <Button
+            android:id="@+id/buttonViewLog"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="@string/settings_view_log" />
+
         <ProgressBar
             android:id="@+id/settingsProgress"
             style="?android:attr/progressBarStyleHorizontal"

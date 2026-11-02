@@ -2,6 +2,7 @@ package com.sol.sillytavern.ui
 
 import android.app.AlertDialog
 import android.content.ActivityNotFoundException
+import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import android.provider.OpenableColumns
@@ -32,6 +33,7 @@ class SettingsActivity : ComponentActivity() {
 
     private lateinit var exportButton: Button
     private lateinit var importButton: Button
+    private lateinit var viewLogButton: Button
     private lateinit var progress: ProgressBar
     private lateinit var status: TextView
 
@@ -66,11 +68,22 @@ class SettingsActivity : ComponentActivity() {
 
         exportButton = findViewById(R.id.buttonExport)
         importButton = findViewById(R.id.buttonImport)
+        viewLogButton = findViewById(R.id.buttonViewLog)
         progress = findViewById(R.id.settingsProgress)
         status = findViewById(R.id.settingsStatus)
 
         exportButton.setOnClickListener { startExport() }
         importButton.setOnClickListener { startImport() }
+        viewLogButton.setOnClickListener { openLog() }
+    }
+
+    /** Opens the read-only startup log viewer. */
+    private fun openLog() {
+        try {
+            startActivity(Intent(this, LogActivity::class.java))
+        } catch (e: ActivityNotFoundException) {
+            Log.w(TAG, "log activity missing", e)
+        }
     }
 
     private fun startExport() {
@@ -178,6 +191,7 @@ class SettingsActivity : ComponentActivity() {
         this.busy = busy
         exportButton.isEnabled = !busy
         importButton.isEnabled = !busy
+        viewLogButton.isEnabled = !busy
         if (busy) {
             progress.visibility = View.VISIBLE
             if (statusText != null) {

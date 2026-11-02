@@ -48,6 +48,27 @@
     <string name="settings_import_confirm_positive">导入</string>
     <string name="settings_import_archive_unknown">所选文件</string>
     <string name="settings_import_hint">提示：导入完成后，请从最近任务中划掉本应用再重新打开，导入才会生效。</string>
+    <string name="settings_view_log">查看日志</string>
+
+    <string name="log_title">启动日志</string>
+    <string name="log_refresh">刷新</string>
+    <string name="log_share">分享</string>
+    <string name="log_export">导出</string>
+    <string name="log_loading">正在读取日志…</string>
+    <string name="log_status_truncated">文件末尾 %1$s，显示最后 %2$d 行</string>
+    <string name="log_status_full">%1$s，显示最后 %2$d 行</string>
+    <string name="log_empty">日志文件为空</string>
+    <string name="log_missing">日志文件不存在：%1$s</string>
+    <string name="log_missing_hint">服务可能尚未启动，或日志已被清理。启动一次后再回来查看。</string>
+    <string name="log_missing_short">日志文件不存在</string>
+    <string name="log_read_failed">读取日志失败：%1$s</string>
+    <string name="log_share_title">分享日志</string>
+    <string name="log_share_subject">SillyTavern 启动日志</string>
+    <string name="log_share_unavailable">未找到可分享的应用</string>
+    <string name="log_exporting">正在导出日志…</string>
+    <string name="log_export_success">日志已导出</string>
+    <string name="log_export_failed_short">导出日志失败，请重试</string>
+    <string name="log_export_cancelled">已取消导出</string>
 
     <string name="import_apply_failed_format">导入数据应用失败：%1$s</string>
 

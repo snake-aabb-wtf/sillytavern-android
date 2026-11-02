@@ -562,18 +562,33 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * Opens the log viewer. The Toast remains only as the "no log yet" fallback: by the
+     * time the error panel is shown the file normally exists, but a failed start may have
+     * died before it was created.
+     */
     private fun openLog() {
-        val logPath = lastFailureLogPath ?: File(filesDir, NODE_LOG_RELATIVE_PATH).absolutePath
+        val logFile = File(lastFailureLogPath ?: File(filesDir, NODE_LOG_RELATIVE_PATH).absolutePath)
+        if (!logFile.isFile) {
+            Toast.makeText(
+                this,
+                getString(R.string.log_path_toast, logFile.absolutePath),
+                Toast.LENGTH_LONG,
+            ).show()
+            return
+        }
         try {
             startActivity(
-                Intent()
-                    .setClassName(this, LOG_ACTIVITY_CLASS)
-                    .putExtra(EXTRA_LOG_PATH, logPath),
+                Intent(this, LogActivity::class.java)
+                    .putExtra(LogActivity.EXTRA_LOG_PATH, logFile.absolutePath),
             )
         } catch (e: ActivityNotFoundException) {
-            // Task 11 adds LogActivity; until then show the path the user can inspect.
-            Toast.makeText(this, getString(R.string.log_path_toast, logPath), Toast.LENGTH_LONG)
-                .show()
+            Log.w(TAG, "log activity missing", e)
+            Toast.makeText(
+                this,
+                getString(R.string.log_path_toast, logFile.absolutePath),
+                Toast.LENGTH_LONG,
+            ).show()
         }
     }
 
@@ -623,8 +638,6 @@ class MainActivity : ComponentActivity() {
         val MIME_TOKEN = Regex("^[a-z0-9][a-z0-9!#$&^_.+-]*$")
         const val PREFS_NAME = "sillytavern_prefs"
         const val KEY_NOTIFICATION_PERMISSION_ASKED = "notification_permission_asked"
-        const val LOG_ACTIVITY_CLASS = "com.sol.sillytavern.ui.LogActivity"
-        const val EXTRA_LOG_PATH = "logPath"
         const val NODE_LOG_RELATIVE_PATH = "logs/node.log"
         const val SPLASH_FALLBACK_MS = 5_000L
 
