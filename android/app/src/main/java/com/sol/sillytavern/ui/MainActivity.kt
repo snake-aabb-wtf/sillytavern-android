@@ -563,33 +563,15 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * Opens the log viewer. The Toast remains only as the "no log yet" fallback: by the
-     * time the error panel is shown the file normally exists, but a failed start may have
-     * died before it was created.
+     * Opens the log viewer. A missing log is not handled here: LogActivity shows the path
+     * and a clear "not started yet" message, so there is no dead Toast branch to keep.
      */
     private fun openLog() {
-        val logFile = File(lastFailureLogPath ?: File(filesDir, NODE_LOG_RELATIVE_PATH).absolutePath)
-        if (!logFile.isFile) {
-            Toast.makeText(
-                this,
-                getString(R.string.log_path_toast, logFile.absolutePath),
-                Toast.LENGTH_LONG,
-            ).show()
-            return
-        }
-        try {
-            startActivity(
-                Intent(this, LogActivity::class.java)
-                    .putExtra(LogActivity.EXTRA_LOG_PATH, logFile.absolutePath),
-            )
-        } catch (e: ActivityNotFoundException) {
-            Log.w(TAG, "log activity missing", e)
-            Toast.makeText(
-                this,
-                getString(R.string.log_path_toast, logFile.absolutePath),
-                Toast.LENGTH_LONG,
-            ).show()
-        }
+        val logPath = lastFailureLogPath ?: File(filesDir, NODE_LOG_RELATIVE_PATH).absolutePath
+        startActivity(
+            Intent(this, LogActivity::class.java)
+                .putExtra(LogActivity.EXTRA_LOG_PATH, logPath),
+        )
     }
 
     /** Opens the backup screen; the gear only covers its own 48dp corner. */

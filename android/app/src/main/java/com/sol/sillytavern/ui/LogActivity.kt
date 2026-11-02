@@ -4,6 +4,7 @@ import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.provider.DocumentsContract
 import android.text.format.Formatter
 import android.util.Log
 import android.view.View
@@ -155,7 +156,7 @@ class LogActivity : ComponentActivity() {
 
     /**
      * Reads at most [MAX_TAIL_BYTES] from the end, drops the partial first line when the
-     * read did not start at byte 0, then keeps the last [MAX_LINES] lines.
+     * read did not start at a line boundary, then keeps the last [MAX_LINES] lines.
      */
     private fun readTail(file: File): LoadResult {
         if (!file.isFile) return LoadResult.Missing
@@ -163,13 +164,17 @@ class LogActivity : ComponentActivity() {
         return try {
             val start = (file.length() - MAX_TAIL_BYTES).coerceAtLeast(0L)
             val bytes = ByteArrayOutputStream()
+            var previousByte = -1
             FileInputStream(file).use { input ->
-                var skip = start
+                // Read the byte before the cut first: landing exactly on a newline means
+                // the first line in the slice is complete and must be kept.
+                var skip = if (start > 0L) start - 1 else 0L
                 while (skip > 0) {
                     val skipped = input.skip(skip)
                     if (skipped <= 0) break
                     skip -= skipped
                 }
+                previousByte = if (start > 0L) input.read() else -1
                 val buffer = ByteArray(READ_BUFFER_BYTES)
                 var read = 0L
                 while (read < MAX_TAIL_BYTES) {
@@ -180,22 +185,29 @@ class LogActivity : ComponentActivity() {
                     read += n
                 }
             }
-            val raw = bytes.toByteArray()
+
+            var raw = bytes.toByteArray()
             if (raw.isEmpty()) return LoadResult.Empty
 
-            var text = String(raw, Charsets.UTF_8)
-            if (start > 0L) {
-                val firstNewline = text.indexOf('\n')
-                // No newline means a single line longer than the cap; show that slice
-                // rather than nothing.
-                if (firstNewline >= 0) text = text.substring(firstNewline + 1)
+            if (start > 0L && previousByte != '\n'.code) {
+                // The cut landed mid-line. Work on bytes: a char index would drift on
+                // multi-byte UTF-8 (Chinese log lines). No newline means a single line
+                // longer than the cap; keep that slice rather than nothing.
+                val firstNewline = raw.indexOf(10.toByte())
+                if (firstNewline >= 0) raw = raw.copyOfRange(firstNewline + 1, raw.size)
             }
+            if (raw.isEmpty()) return LoadResult.Empty
 
-            val lines = text.split('\n')
+            val lines = String(raw, Charsets.UTF_8)
+                .split('\n')
                 .map { it.trimEnd('\r') }
                 // A file ending in "\n" leaves one empty element that is not a log line.
                 .dropLastWhile { it.isEmpty() }
                 .takeLast(MAX_LINES)
+
+            // A cut immediately before a trailing newline leaves no complete line; report
+            // the same empty state as a zero-byte log so 分享 stays disabled.
+            if (lines.isEmpty()) return LoadResult.Empty
 
             LoadResult.Loaded(
                 text = lines.joinToString("\n"),
@@ -212,20 +224,43 @@ class LogActivity : ComponentActivity() {
         }
     }
 
-    /** Shares the exact rendered tail; plain text needs no FileProvider. */
+    /**
+     * Shares the rendered tail. The payload is clamped to [MAX_SHARE_BYTES] because the
+     * chooser re-marshals EXTRA_TEXT through EXTRA_INTENT, and a full 256 KB tail is
+     * ~512 KB as UTF-16 — enough to blow the ~1 MB binder transaction limit.
+     */
     private fun share() {
         val text = tailText ?: return
         val intent = Intent(Intent.ACTION_SEND).apply {
             type = "text/plain"
             putExtra(Intent.EXTRA_SUBJECT, getString(R.string.log_share_subject))
-            putExtra(Intent.EXTRA_TEXT, text)
+            putExtra(Intent.EXTRA_TEXT, clampForShare(text))
         }
         try {
             startActivity(Intent.createChooser(intent, getString(R.string.log_share_title)))
         } catch (e: ActivityNotFoundException) {
             Log.w(TAG, "no share target", e)
             Toast.makeText(this, R.string.log_share_unavailable, Toast.LENGTH_LONG).show()
+        } catch (e: RuntimeException) {
+            // TransactionTooLargeException and friends are unchecked.
+            Log.w(TAG, "could not hand the log to the chooser", e)
+            Toast.makeText(this, R.string.log_share_failed, Toast.LENGTH_LONG).show()
         }
+    }
+
+    /** Keeps the newest [MAX_SHARE_BYTES] of UTF-8 text, on a whole-line boundary. */
+    private fun clampForShare(text: String): String {
+        val bytes = text.toByteArray(Charsets.UTF_8)
+        if (bytes.size <= MAX_SHARE_BYTES) return text
+
+        var start = bytes.size - MAX_SHARE_BYTES
+        // Never start inside a multi-byte sequence.
+        while (start < bytes.size && (bytes[start].toInt() and 0xC0) == 0x80) start++
+
+        var clipped = String(bytes, start, bytes.size - start, Charsets.UTF_8)
+        val firstNewline = clipped.indexOf('\n')
+        if (firstNewline >= 0) clipped = clipped.substring(firstNewline + 1)
+        return clipped + "\n" + getString(R.string.log_share_truncated)
     }
 
     private fun startExport() {
@@ -249,14 +284,23 @@ class LogActivity : ComponentActivity() {
         setBusy(true, R.string.log_exporting)
         lifecycleScope.launch {
             val written = withContext(Dispatchers.IO) {
-                try {
-                    contentResolver.openOutputStream(uri, "wt")?.use { output ->
-                        FileInputStream(logFile).use { input -> input.copyTo(output) }
-                    } != null
+                val ok = try {
+                    val output = contentResolver.openOutputStream(uri, "wt")
+                    if (output == null) {
+                        false
+                    } else {
+                        output.use { out ->
+                            FileInputStream(logFile).use { input -> input.copyTo(out) }
+                        }
+                        true
+                    }
                 } catch (e: Exception) {
                     Log.w(TAG, "could not export log", e)
                     false
                 }
+                // Never leave a truncated document behind after a mid-write failure.
+                if (!ok) discardDocument(uri)
+                ok
             }
             setBusy(false)
             Toast.makeText(
@@ -264,6 +308,16 @@ class LogActivity : ComponentActivity() {
                 if (written) R.string.log_export_success else R.string.log_export_failed_short,
                 Toast.LENGTH_LONG,
             ).show()
+        }
+    }
+
+    /** Removes a partial SAF document after a failed export; best effort. */
+    private fun discardDocument(uri: Uri) {
+        try {
+            DocumentsContract.deleteDocument(contentResolver, uri)
+        } catch (e: Exception) {
+            // Non-document providers reject this; the partial file is all we can leave.
+            Log.w(TAG, "could not delete partial export document", e)
         }
     }
 
@@ -303,6 +357,9 @@ class LogActivity : ComponentActivity() {
 
         /** Upper bound on rendered (and shared) lines. */
         const val MAX_LINES = 500
+
+        /** Upper bound on the ACTION_SEND payload, in UTF-8 bytes. */
+        const val MAX_SHARE_BYTES = 64 * 1024
 
         private const val READ_BUFFER_BYTES = 64 * 1024
         private const val TAG = "LogActivity"
