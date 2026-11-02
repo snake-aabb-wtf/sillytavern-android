@@ -167,15 +167,20 @@ object ServerController {
     suspend fun awaitReady(port: Int, timeoutMs: Long = READY_TIMEOUT_MS): Boolean =
         withContext(Dispatchers.IO) {
             val deadlineNanos = System.nanoTime() + timeoutMs.coerceAtLeast(0L) * 1_000_000L
+            var ready = false
             while (true) {
                 currentCoroutineContext().ensureActive()
                 if (_state.value is ServerState.Failed) return@withContext false
-                if (probeOnce(port)) return@withContext true
+                if (probeOnce(port)) {
+                    ready = true
+                    break
+                }
                 currentCoroutineContext().ensureActive()
                 val remainingMs = (deadlineNanos - System.nanoTime()) / 1_000_000L
-                if (remainingMs <= 0L) return@withContext false
+                if (remainingMs <= 0L) break
                 delay(minOf(POLL_INTERVAL_MS, remainingMs))
             }
+            ready
         }
 
     /** Retry path when a previous attempt timed out but its Node thread is still alive. */
@@ -270,7 +275,7 @@ object ServerController {
                 logFile,
                 ParcelFileDescriptor.MODE_CREATE or
                     ParcelFileDescriptor.MODE_APPEND or
-                    ParcelFileDescriptor.MODE_WRONLY,
+                    ParcelFileDescriptor.MODE_WRITE_ONLY,
             ).detachFd()
         } catch (e: IOException) {
             fail(attemptId, "无法打开日志文件 $logPath：${e.message}", logPath)

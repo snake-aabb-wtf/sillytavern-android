@@ -375,7 +375,7 @@ class MainActivity : ComponentActivity() {
      * Builds the picker intent without ever excluding a mixed accept list.
      *
      * Character import asks for `accept=".json, image/png, .yaml, .yml, .charx, .byaf"`;
-     * narrowing the picker to `image/*` (or any single type) would make those cards
+     * narrowing the picker to a single image type would make those cards
      * unselectable. So the base type is always the wildcard type; `EXTRA_MIME_TYPES` is only
      * attached when every entry is a real MIME type we can hand to the picker. Unknown
      * extensions mean "no filter at all".

@@ -8,6 +8,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.os.IBinder
 import android.os.Process
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
@@ -55,6 +56,9 @@ class NodeService : Service() {
         }
         return START_NOT_STICKY
     }
+
+    /** Node runs inside this process; nothing can bind to the service. */
+    override fun onBind(intent: Intent?): IBinder? = null
 
     /**
      * Swiping the app off the recents list is the "quit" signal for the whole app.
