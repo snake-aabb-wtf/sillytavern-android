@@ -26,6 +26,13 @@
             </intent-filter>
         </activity>
 
+        <!-- Data export/import screen; reachable only from the in-app gear. -->
+        <activity
+            android:name=".ui.SettingsActivity"
+            android:exported="false"
+            android:label="@string/settings_title"
+            android:theme="@android:style/Theme.DeviceDefault.NoActionBar" />
+
         <!-- Hosts the embedded Node runtime; keeps the app process alive off-screen. -->
         <service
             android:name=".server.NodeService"

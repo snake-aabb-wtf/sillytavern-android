@@ -83,4 +83,21 @@
                 android:text="@string/error_retry" />
         </LinearLayout>
     </LinearLayout>
+
+    <!-- Small overlay control: only this 48dp corner consumes touches, the rest of the
+         WebView stays fully interactive. Drawn last so it stays reachable even when the
+         splash or the error panel is up (a failed import must not trap the user). -->
+    <ImageButton
+        android:id="@+id/buttonSettings"
+        android:layout_width="48dp"
+        android:layout_height="48dp"
+        android:layout_gravity="top|end"
+        android:layout_marginTop="8dp"
+        android:layout_marginEnd="8dp"
+        android:background="@drawable/bg_settings_button"
+        android:contentDescription="@string/settings_open"
+        android:padding="12dp"
+        android:scaleType="centerInside"
+        android:src="@drawable/ic_settings"
+        android:tint="@android:color/white" />
 </FrameLayout>

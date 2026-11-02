@@ -28,4 +28,37 @@
     <string name="blob_too_large">文件过大（&gt;64 MB）</string>
     <string name="download_started">已开始下载</string>
     <string name="download_failed">下载失败</string>
+
+    <string name="settings_title">设置</string>
+    <string name="settings_open">设置</string>
+    <string name="settings_data_title">数据备份</string>
+    <string name="settings_data_description">导出会把聊天记录、角色卡与设置打包成一个 zip 文件。导入的数据只会在下次启动应用时生效，届时当前数据会被替换。</string>
+    <string name="settings_export">导出数据</string>
+    <string name="settings_import">导入数据</string>
+    <string name="settings_exporting">正在导出数据…</string>
+    <string name="settings_importing">正在导入数据…</string>
+    <string name="settings_export_success">已导出 %1$d 个文件（%2$s）</string>
+    <string name="settings_export_failed">导出失败：%1$s</string>
+    <string name="settings_export_cancelled">已取消导出</string>
+    <string name="settings_import_success">导入已准备好，重启应用后生效</string>
+    <string name="settings_import_failed">导入失败：%1$s</string>
+    <string name="settings_import_cancelled">已取消导入</string>
+    <string name="settings_import_confirm_title">确认导入</string>
+    <string name="settings_import_confirm_message">将使用「%1$s」中的备份替换当前数据。\n\n导入会在下次启动应用时生效，当前数据将被覆盖。是否继续？</string>
+    <string name="settings_import_confirm_positive">导入</string>
+    <string name="settings_import_archive_unknown">所选文件</string>
+    <string name="settings_import_hint">提示：导入完成后，请从最近任务中划掉本应用再重新打开，导入才会生效。</string>
+
+    <string name="import_apply_failed_format">导入数据应用失败：%1$s</string>
+
+    <string name="backup_error_unknown">未知错误</string>
+    <string name="backup_error_no_data">数据目录不存在，暂时无法导出</string>
+    <string name="backup_error_open">无法打开所选文件</string>
+    <string name="backup_error_unsafe_entry">备份包包含非法路径：%1$s</string>
+    <string name="backup_error_missing_settings">备份包不完整：缺少 default-user/settings.json</string>
+    <string name="backup_error_stage_clear">无法准备导入目录</string>
+    <string name="backup_error_backup">无法备份现有数据</string>
+    <string name="backup_error_swap">无法替换数据目录</string>
+    <string name="backup_error_config">无法恢复 config.yaml</string>
+    <string name="backup_error_apply">无法应用导入数据：%1$s</string>
 </resources>

@@ -20,6 +20,7 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Button
+import android.widget.ImageButton
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -31,6 +32,7 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.lifecycleScope
 import com.sol.sillytavern.BuildConfig
 import com.sol.sillytavern.R
+import com.sol.sillytavern.backup.DataBackup
 import com.sol.sillytavern.server.NodeService
 import com.sol.sillytavern.server.ServerController
 import com.sol.sillytavern.server.ServerState
@@ -154,6 +156,7 @@ class MainActivity : ComponentActivity() {
 
         findViewById<Button>(R.id.buttonViewLog).setOnClickListener { openLog() }
         findViewById<Button>(R.id.buttonRetry).setOnClickListener { retry() }
+        findViewById<ImageButton>(R.id.buttonSettings).setOnClickListener { openSettings() }
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
@@ -170,7 +173,31 @@ class MainActivity : ComponentActivity() {
         }
 
         requestNotificationPermissionIfNeeded()
-        startServer()
+        applyPendingImportThenStart()
+    }
+
+    /**
+     * Restores a staged import before Node starts, then boots the server.
+     *
+     * A live Node keeps file handles inside `data/`, so a swap is only safe on a fresh
+     * process. On activity recreation (state already beyond [ServerState.Idle]) the marker
+     * is left for the next cold start instead.
+     */
+    private fun applyPendingImportThenStart() {
+        if (ServerController.state.value != ServerState.Idle) {
+            startServer()
+            return
+        }
+        lifecycleScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                DataBackup.applyPendingImport(applicationContext)
+            }
+            if (result is DataBackup.Result.Failure) {
+                showError(getString(R.string.import_apply_failed_format, result.reason))
+                return@launch
+            }
+            startServer()
+        }
     }
 
     /**
@@ -538,6 +565,15 @@ class MainActivity : ComponentActivity() {
             // Task 11 adds LogActivity; until then show the path the user can inspect.
             Toast.makeText(this, getString(R.string.log_path_toast, logPath), Toast.LENGTH_LONG)
                 .show()
+        }
+    }
+
+    /** Opens the backup screen; the gear only covers its own 48dp corner. */
+    private fun openSettings() {
+        try {
+            startActivity(Intent(this, SettingsActivity::class.java))
+        } catch (e: ActivityNotFoundException) {
+            Log.w(TAG, "settings activity missing", e)
         }
     }
 
