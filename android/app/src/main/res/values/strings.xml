@@ -16,4 +16,16 @@
     <string name="notification_title">SillyTavern 正在运行</string>
     <string name="notification_text">本地服务运行中，点按返回应用</string>
     <string name="notification_text_failed">服务未能启动，点按查看原因</string>
+
+    <string name="file_chooser_title">选择文件</string>
+    <string name="file_chooser_unavailable">未找到可用的文件选择器</string>
+    <string name="save_cancelled">已取消保存</string>
+    <string name="save_complete">文件已保存</string>
+    <string name="save_failed">保存失败，请重试</string>
+    <string name="save_busy">请先完成上一次保存</string>
+    <string name="blob_invalid">无法识别要保存的文件</string>
+    <string name="blob_unreadable">文件内容读取失败</string>
+    <string name="blob_too_large">文件超过 64 MB，无法保存</string>
+    <string name="download_started">已开始下载</string>
+    <string name="download_failed">下载失败</string>
 </resources>

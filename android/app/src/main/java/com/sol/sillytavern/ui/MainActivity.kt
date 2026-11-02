@@ -1,13 +1,19 @@
 package com.sol.sillytavern.ui
 
 import android.Manifest
+import android.app.DownloadManager
 import android.content.ActivityNotFoundException
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.util.Log
 import android.view.View
+import android.webkit.URLUtil
+import android.webkit.ValueCallback
+import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
@@ -28,10 +34,14 @@ import com.sol.sillytavern.R
 import com.sol.sillytavern.server.NodeService
 import com.sol.sillytavern.server.ServerController
 import com.sol.sillytavern.server.ServerState
+import com.sol.sillytavern.web.WebBridge
 import java.io.File
+import java.io.IOException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * Full-screen WebView host for the local SillyTavern server.
@@ -57,6 +67,52 @@ class MainActivity : ComponentActivity() {
 
     /** Log path from [ServerState.Failed], used by the 查看日志 button. */
     private var lastFailureLogPath: String? = null
+
+    /** JS bridge exposed as `window.STBridge`; created before the first load. */
+    private lateinit var webBridge: WebBridge
+
+    /** Cached contents of assets/blob_bridge.js, read once. */
+    private var blobBridgeScript: String? = null
+
+    /** Outstanding `<input type=file>` request; must be answered exactly once. */
+    private var fileChooserCallback: ValueCallback<Array<Uri>>? = null
+
+    /** Bytes from STBridge.saveBlob waiting for the SAF picker. */
+    private var pendingSaveBytes: ByteArray? = null
+    private var savePickerOpen = false
+
+    /**
+     * `<input type=file>` support. Registered as a field so it exists before the activity
+     * reaches STARTED, as ActivityResultRegistry requires.
+     */
+    private val fileChooserLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        val callback = fileChooserCallback
+        fileChooserCallback = null
+        if (callback == null) return@registerForActivityResult
+        val uris = if (result.resultCode == RESULT_OK) {
+            WebChromeClient.FileChooserParams.parseResult(result.resultCode, result.data)
+        } else {
+            null
+        }
+        // A cancel or an empty selection must deliver null, never an empty array.
+        callback.onReceiveValue(uris?.takeIf { it.isNotEmpty() })
+    }
+
+    /** Blob export destination picker; the bytes are written once a URI comes back. */
+    private val createDocumentLauncher = registerForActivityResult(
+        ActivityResultContracts.CreateDocument("application/octet-stream"),
+    ) { uri ->
+        savePickerOpen = false
+        val bytes = pendingSaveBytes
+        pendingSaveBytes = null
+        if (uri == null || bytes == null) {
+            Toast.makeText(this, R.string.save_cancelled, Toast.LENGTH_SHORT).show()
+            return@registerForActivityResult
+        }
+        writeBlob(uri, bytes)
+    }
 
     /**
      * Android 13+ gates the service notification behind a runtime permission. The result is
@@ -154,6 +210,25 @@ class MainActivity : ComponentActivity() {
 
     @Suppress("DEPRECATION")
     private fun configureWebView() {
+        webBridge = WebBridge(object : WebBridge.Host {
+            override fun onBlobReady(suggestedName: String, bytes: ByteArray) {
+                launchSave(suggestedName, bytes)
+            }
+
+            override fun onBlobRejected(reason: WebBridge.Rejection) {
+                val message = when (reason) {
+                    WebBridge.Rejection.INVALID_PAYLOAD -> R.string.blob_invalid
+                    WebBridge.Rejection.TOO_LARGE -> R.string.blob_too_large
+                    WebBridge.Rejection.DECODE_FAILED -> R.string.blob_unreadable
+                }
+                Toast.makeText(this@MainActivity, message, Toast.LENGTH_LONG).show()
+            }
+        })
+        // Attached before loadUrl() so the very first page can export blobs. This is only
+        // safe because the WebView is restricted to the loopback page: never expose the
+        // interface to arbitrary origins.
+        webView.addJavascriptInterface(webBridge, BRIDGE_NAME)
+
         webView.settings.apply {
             javaScriptEnabled = true
             domStorageEnabled = true
@@ -188,6 +263,9 @@ class MainActivity : ComponentActivity() {
             }
 
             override fun onPageFinished(view: WebView, url: String) {
+                if (view.url?.startsWith(LOOPBACK_URL_PREFIX) == true) {
+                    injectBlobBridge(view)
+                }
                 if (!firstPaintPending) return
                 firstPaintPending = false
                 splashFallbackJob?.cancel()
@@ -209,6 +287,133 @@ class MainActivity : ComponentActivity() {
                 )
             }
         }
+
+        webView.webChromeClient = object : WebChromeClient() {
+            override fun onShowFileChooser(
+                view: WebView,
+                filePathCallback: ValueCallback<Array<Uri>>,
+                fileChooserParams: WebChromeClient.FileChooserParams,
+            ): Boolean {
+                // A second request without answering the first leaks the WebView callback.
+                fileChooserCallback?.onReceiveValue(null)
+                fileChooserCallback = filePathCallback
+
+                val intent = Intent(Intent.ACTION_GET_CONTENT).apply {
+                    addCategory(Intent.CATEGORY_OPENABLE)
+                    type = chooserMimeType(fileChooserParams.acceptTypes)
+                    putExtra(Intent.EXTRA_ALLOW_MULTIPLE, false)
+                }
+                return try {
+                    fileChooserLauncher.launch(
+                        Intent.createChooser(intent, getString(R.string.file_chooser_title)),
+                    )
+                    true
+                } catch (e: ActivityNotFoundException) {
+                    fileChooserCallback = null
+                    filePathCallback.onReceiveValue(null)
+                    Toast.makeText(
+                        this@MainActivity,
+                        R.string.file_chooser_unavailable,
+                        Toast.LENGTH_LONG,
+                    ).show()
+                    false
+                }
+            }
+        }
+
+        webView.setDownloadListener { url, _, contentDisposition, mimeType, _ ->
+            val scheme = Uri.parse(url).scheme?.lowercase()
+            // blob:/data: never reach DownloadManager; blob_bridge.js covers those.
+            if (scheme != "http" && scheme != "https") return@setDownloadListener
+            enqueueDownload(url, contentDisposition, mimeType)
+        }
+    }
+
+    /**
+     * Character-card import uses `<input type=file>`. ACTION_GET_CONTENT plus a broad
+     * fallback type keeps .png/.json cards selectable regardless of what the page asks for.
+     */
+    private fun chooserMimeType(acceptTypes: Array<String>?): String {
+        val wantsImage = acceptTypes.orEmpty().any {
+            it.contains("image", ignoreCase = true)
+        }
+        return if (wantsImage) "image/*" else "*/*"
+    }
+
+    private fun enqueueDownload(url: String, contentDisposition: String?, mimeType: String?) {
+        try {
+            val fileName = URLUtil.guessFileName(url, contentDisposition, mimeType)
+            val request = DownloadManager.Request(Uri.parse(url))
+                .setTitle(fileName)
+                .setNotificationVisibility(
+                    DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED,
+                )
+                .setAllowedOverMetered(true)
+                .setAllowedOverRoaming(false)
+            if (!mimeType.isNullOrBlank()) {
+                request.setMimeType(mimeType)
+            }
+            val manager = getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+            manager.enqueue(request)
+            Toast.makeText(this, R.string.download_started, Toast.LENGTH_SHORT).show()
+        } catch (e: Exception) {
+            Log.w(TAG, "could not enqueue download", e)
+            Toast.makeText(this, R.string.download_failed, Toast.LENGTH_LONG).show()
+        }
+    }
+
+    /** Stores the decoded blob and opens the SAF create-document picker. */
+    private fun launchSave(suggestedName: String, bytes: ByteArray) {
+        if (isFinishing || isDestroyed) return
+        if (savePickerOpen) {
+            Toast.makeText(this, R.string.save_busy, Toast.LENGTH_SHORT).show()
+            return
+        }
+        pendingSaveBytes = bytes
+        savePickerOpen = true
+        try {
+            createDocumentLauncher.launch(suggestedName)
+        } catch (e: Exception) {
+            // No SAF-capable document provider on this device.
+            savePickerOpen = false
+            pendingSaveBytes = null
+            Log.w(TAG, "could not open create-document picker", e)
+            Toast.makeText(this, R.string.save_failed, Toast.LENGTH_LONG).show()
+        }
+    }
+
+    /** Writes on an IO thread; the SAF stream is closed before the Toast is shown. */
+    private fun writeBlob(uri: Uri, bytes: ByteArray) {
+        lifecycleScope.launch {
+            val written = withContext(Dispatchers.IO) {
+                try {
+                    contentResolver.openOutputStream(uri, "wt")?.use { it.write(bytes) } != null
+                } catch (e: Exception) {
+                    Log.w(TAG, "could not write export", e)
+                    false
+                }
+            }
+            Toast.makeText(
+                this@MainActivity,
+                if (written) R.string.save_complete else R.string.save_failed,
+                Toast.LENGTH_LONG,
+            ).show()
+        }
+    }
+
+    /**
+     * Re-injects the asset on every loopback page load. The script itself is idempotent, so
+     * repeated injections cannot stack duplicate listeners.
+     */
+    private fun injectBlobBridge(view: WebView) {
+        val script = blobBridgeScript ?: try {
+            assets.open(BLOB_BRIDGE_ASSET).bufferedReader().use { it.readText() }
+                .also { blobBridgeScript = it }
+        } catch (e: IOException) {
+            Log.w(TAG, "blob bridge asset missing", e)
+            return
+        }
+        view.evaluateJavascript(script, null)
     }
 
     private fun render(state: ServerState) {
@@ -307,6 +512,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         splashFallbackJob?.cancel()
+        fileChooserCallback?.onReceiveValue(null)
+        fileChooserCallback = null
         webView.stopLoading()
         webView.removeAllViews()
         webView.destroy()
@@ -314,6 +521,10 @@ class MainActivity : ComponentActivity() {
     }
 
     private companion object {
+        const val TAG = "MainActivity"
+        const val BRIDGE_NAME = "STBridge"
+        const val BLOB_BRIDGE_ASSET = "blob_bridge.js"
+        const val LOOPBACK_URL_PREFIX = "http://127.0.0.1:"
         const val PREFS_NAME = "sillytavern_prefs"
         const val KEY_NOTIFICATION_PERMISSION_ASKED = "notification_permission_asked"
         const val LOG_ACTIVITY_CLASS = "com.sol.sillytavern.ui.LogActivity"
