@@ -1,0 +1,10 @@
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/nodejs-mobile/
+SillyTavern/node_modules/
+SillyTavern/dist/
+*.iml
+.idea/
+HANDOFF.md
