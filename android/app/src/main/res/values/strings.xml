@@ -52,6 +52,7 @@
     <string name="import_apply_failed_format">导入数据应用失败：%1$s</string>
 
     <string name="backup_error_unknown">未知错误</string>
+    <string name="backup_error_internal">内部错误（%1$s）</string>
     <string name="backup_error_no_data">数据目录不存在，暂时无法导出</string>
     <string name="backup_error_open">无法打开所选文件</string>
     <string name="backup_error_unsafe_entry">备份包包含非法路径：%1$s</string>
@@ -60,5 +61,4 @@
     <string name="backup_error_backup">无法备份现有数据</string>
     <string name="backup_error_swap">无法替换数据目录</string>
     <string name="backup_error_config">无法恢复 config.yaml</string>
-    <string name="backup_error_apply">无法应用导入数据：%1$s</string>
 </resources>

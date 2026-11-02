@@ -42,6 +42,11 @@ class DataBackupTest {
     }
 
     @Test
+    fun nulByteIsRejected() {
+        assertFalse(DataBackup.isSafeEntry("a\u0000b"))
+    }
+
+    @Test
     fun backslashTraversalIsRejected() {
         assertFalse(DataBackup.isSafeEntry("a\\..\\b"))
     }

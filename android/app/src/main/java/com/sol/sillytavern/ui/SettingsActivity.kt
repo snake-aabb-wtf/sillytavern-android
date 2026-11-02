@@ -137,6 +137,10 @@ class SettingsActivity : ComponentActivity() {
             .setNegativeButton(android.R.string.cancel) { _, _ ->
                 Toast.makeText(this, R.string.settings_import_cancelled, Toast.LENGTH_SHORT).show()
             }
+            // Back / outside tap is a cancel too; otherwise the dialog vanishes silently.
+            .setOnCancelListener {
+                Toast.makeText(this, R.string.settings_import_cancelled, Toast.LENGTH_SHORT).show()
+            }
             .show()
     }
 

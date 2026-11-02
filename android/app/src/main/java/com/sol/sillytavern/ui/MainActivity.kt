@@ -179,12 +179,19 @@ class MainActivity : ComponentActivity() {
     /**
      * Restores a staged import before Node starts, then boots the server.
      *
-     * A live Node keeps file handles inside `data/`, so a swap is only safe on a fresh
-     * process. On activity recreation (state already beyond [ServerState.Idle]) the marker
-     * is left for the next cold start instead.
+     * A live Node keeps file handles inside `data/`, so a swap is only safe before the
+     * first start (or after a failed attempt). On activity recreation while the server is
+     * up the marker is left for the next cold start instead.
      */
     private fun applyPendingImportThenStart() {
-        if (ServerController.state.value != ServerState.Idle) {
+        val state = ServerController.state.value
+        // Installing/Starting/Ready mean Node is (or is about to be) live; a rename under
+        // it would detach the directory the server writes into. Idle and Failed (apply
+        // failure or a failed install) still allow the swap.
+        if (state is ServerState.Installing ||
+            state is ServerState.Starting ||
+            state is ServerState.Ready
+        ) {
             startServer()
             return
         }
@@ -549,7 +556,9 @@ class MainActivity : ComponentActivity() {
             loadedUrl = null
             firstPaintPending = false
             lastFailureLogPath = null
-            startServer()
+            // Retry may follow a failed/incomplete import apply: re-run it so the pending
+            // archive is not silently skipped until the next cold start.
+            applyPendingImportThenStart()
         }
     }
 

@@ -2,14 +2,14 @@ package com.sol.sillytavern.backup
 
 import android.content.Context
 import android.net.Uri
+import android.provider.DocumentsContract
 import android.util.Log
 import com.sol.sillytavern.R
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.File
-import java.io.FilterOutputStream
+import java.io.FileOutputStream
 import java.io.IOException
-import java.io.OutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -51,6 +51,7 @@ object DataBackup {
     private const val MARKER_NAME = "data.import.pending"
     private const val CONFIG_NAME = "config.yaml"
     private const val OLD_CONFIG_NAME = "config.yaml.old"
+    private const val PENDING_CONFIG_NAME = "config.import"
 
     /** A backup without this file is not a SillyTavern data directory. */
     private const val REQUIRED_IMPORT_FILE = "default-user/settings.json"
@@ -81,6 +82,10 @@ object DataBackup {
     /**
      * Zips `filesDir/data` (contents only, at the archive root) and `filesDir/config.yaml`
      * into [uri], a document created through SAF.
+     *
+     * The archive is built in `cacheDir` first and only copied to the SAF document once it
+     * is complete. A failure deletes both the temp file and the partial document, so an
+     * interrupted export can never be mistaken for a usable backup on the next import.
      */
     fun export(context: Context, uri: Uri): Result {
         val dataDir = File(context.filesDir, DATA_DIR_NAME)
@@ -88,45 +93,79 @@ object DataBackup {
             return Result.Failure(context.getString(R.string.backup_error_no_data))
         }
 
+        val temp = File(context.cacheDir, "sillytavern-export-${System.currentTimeMillis()}.zip")
         return try {
-            val raw = context.contentResolver.openOutputStream(uri, "wt")
-                ?: return Result.Failure(context.getString(R.string.backup_error_open))
-            val counting = CountingOutputStream(raw)
             var files = 0
-
-            ZipOutputStream(BufferedOutputStream(counting, BUFFER_SIZE)).use { zip ->
-                val config = File(context.filesDir, CONFIG_NAME)
-                if (config.isFile) {
-                    zip.putNextEntry(ZipEntry(CONFIG_NAME))
-                    config.inputStream().buffered(BUFFER_SIZE).use { it.copyTo(zip, BUFFER_SIZE) }
-                    zip.closeEntry()
-                    files++
+            val emitted = mutableSetOf<String>()
+            FileOutputStream(temp).use { fileOut ->
+                ZipOutputStream(BufferedOutputStream(fileOut, BUFFER_SIZE)).use { zip ->
+                    val config = File(context.filesDir, CONFIG_NAME)
+                    if (config.isFile) {
+                        emitted.add(CONFIG_NAME)
+                        zip.putNextEntry(ZipEntry(CONFIG_NAME))
+                        config.inputStream().buffered(BUFFER_SIZE).use {
+                            it.copyTo(zip, BUFFER_SIZE)
+                        }
+                        zip.closeEntry()
+                        files++
+                    }
+                    files += addDirectory(zip, dataDir, dataDir, emitted)
                 }
-                files += addDirectory(zip, dataDir, dataDir)
             }
 
-            // The archive stream is closed by now: counting.count is final.
-            Result.Success(files, counting.count)
+            val bytes = temp.length()
+            val target = context.contentResolver.openOutputStream(uri, "wt")
+                ?: throw IOException(context.getString(R.string.backup_error_open))
+            target.use { out ->
+                temp.inputStream().buffered(BUFFER_SIZE).use { it.copyTo(out, BUFFER_SIZE) }
+            }
+            Result.Success(files, bytes)
         } catch (e: Exception) {
             Log.w(TAG, "export failed", e)
-            Result.Failure(e.message ?: context.getString(R.string.backup_error_unknown))
+            discardDocument(context, uri)
+            Result.Failure(internalReason(context, e))
+        } finally {
+            temp.delete()
         }
     }
 
-    /** Recursively adds [dir] to [zip]; entry names are relative to [base]. */
-    private fun addDirectory(zip: ZipOutputStream, base: File, dir: File): Int {
+    /**
+     * Recursively adds [dir] to [zip]; entry names are relative to [base].
+     *
+     * [emitted] is a belt-and-braces duplicate guard: a zip with two `config.yaml` entries
+     * is rejected by Android's `ZipInputStream` and unreadable by most unzip tools. A
+     * `config.yaml` directly under `data/` is a stray from an older build and is skipped so
+     * it can never shadow the real root config.
+     */
+    private fun addDirectory(
+        zip: ZipOutputStream,
+        base: File,
+        dir: File,
+        emitted: MutableSet<String>,
+    ): Int {
         val children = dir.listFiles() ?: return 0
         var files = 0
         for (child in children) {
             val name = child.relativeTo(base).path.replace(File.separatorChar, '/')
+            if (dir == base && name == CONFIG_NAME) {
+                Log.w(TAG, "skipping stray ${child.path}; root config is exported separately")
+                continue
+            }
             when {
                 child.isDirectory -> {
                     // Keep empty directories (and their structure) in the archive.
-                    zip.putNextEntry(ZipEntry("$name/"))
-                    zip.closeEntry()
-                    files += addDirectory(zip, base, child)
+                    val entryName = "$name/"
+                    if (emitted.add(entryName)) {
+                        zip.putNextEntry(ZipEntry(entryName))
+                        zip.closeEntry()
+                    }
+                    files += addDirectory(zip, base, child, emitted)
                 }
                 child.isFile -> {
+                    if (!emitted.add(name)) {
+                        Log.w(TAG, "skipping duplicate entry $name")
+                        continue
+                    }
                     zip.putNextEntry(ZipEntry(name))
                     child.inputStream().buffered(BUFFER_SIZE).use { it.copyTo(zip, BUFFER_SIZE) }
                     zip.closeEntry()
@@ -210,17 +249,18 @@ object DataBackup {
         } catch (e: Exception) {
             Log.w(TAG, "import staging failed", e)
             discardStaging(staging, marker)
-            Result.Failure(e.message ?: context.getString(R.string.backup_error_unknown))
+            Result.Failure(internalReason(context, e))
         }
     }
 
     /**
      * Applies a staged import. Must be called on a fresh process, before Node starts.
      *
-     * Flow: validate staging, `data` -> `data.old` (when present), `data.import` -> `data`,
-     * move a staged `config.yaml` next to the live one, delete `data.old`, remove the marker.
-     * Any failure restores the previous `data/` and `config.yaml` and returns
-     * [Result.Failure].
+     * Flow: validate staging, move `data.import/config.yaml` out to `config.import` (the
+     * staging directory is about to be renamed), `data` -> `data.old` (when present),
+     * `data.import` -> `data`, `config.yaml` -> `config.yaml.old`, `config.import` ->
+     * `config.yaml`, delete `data.old`/`config.yaml.old`, remove the marker. Any failure
+     * restores the previous `data/` and `config.yaml` and returns [Result.Failure].
      *
      * Safe to call when nothing is pending (returns [Result.Success]).
      */
@@ -234,14 +274,17 @@ object DataBackup {
         val live = File(filesDir, DATA_DIR_NAME)
         val backup = File(filesDir, BACKUP_DIR_NAME)
         val stagedConfig = File(staging, CONFIG_NAME)
+        val pendingConfig = File(filesDir, PENDING_CONFIG_NAME)
         val liveConfig = File(filesDir, CONFIG_NAME)
         val oldConfig = File(filesDir, OLD_CONFIG_NAME)
 
         // A marker without staging means the previous run died after the rename but before
-        // the marker was removed: the import is already in place. Drop the marker instead of
-        // failing every subsequent start.
+        // the marker was removed: the import is already in place. Clean up every other
+        // leftover of the protocol instead of failing on each start.
         if (!staging.isDirectory) {
             Log.w(TAG, "import marker without staging directory; assuming it was applied")
+            File(live, CONFIG_NAME).delete()
+            backup.deleteRecursively()
             marker.delete()
             return Result.Success()
         }
@@ -252,12 +295,26 @@ object DataBackup {
             return Result.Failure(context.getString(R.string.backup_error_missing_settings))
         }
 
+        var configStaged = false
         var liveMoved = false
         var swapped = false
         var configBackedUp = false
         var configSwapped = false
 
         return try {
+            // The staged config must leave the directory before the rename, otherwise the
+            // path becomes stale (`data.import/...` no longer exists once it is `data/`)
+            // and the config lands inside `data/`, colliding with the root entry on export.
+            if (stagedConfig.isFile) {
+                if (pendingConfig.exists() && !pendingConfig.delete()) {
+                    throw IOException(context.getString(R.string.backup_error_config))
+                }
+                if (!stagedConfig.renameTo(pendingConfig)) {
+                    throw IOException(context.getString(R.string.backup_error_config))
+                }
+                configStaged = true
+            }
+
             // A crash between `data` -> `data.old` and `data.import` -> `data` leaves the
             // old data only in `data.old`; put it back before deleting anything.
             if (!live.exists() && backup.isDirectory) {
@@ -279,14 +336,21 @@ object DataBackup {
             }
             swapped = true
 
-            if (stagedConfig.isFile) {
+            // Older builds could leave a config inside data/; it must not shadow the root
+            // config or be exported a second time.
+            val stray = File(live, CONFIG_NAME)
+            if (stray.exists() && !stray.delete()) {
+                Log.w(TAG, "could not remove stray ${stray.path}")
+            }
+
+            if (configStaged) {
                 if (liveConfig.exists()) {
                     if (!liveConfig.renameTo(oldConfig)) {
                         throw IOException(context.getString(R.string.backup_error_config))
                     }
                     configBackedUp = true
                 }
-                if (!stagedConfig.renameTo(liveConfig)) {
+                if (!pendingConfig.renameTo(liveConfig)) {
                     throw IOException(context.getString(R.string.backup_error_config))
                 }
                 configSwapped = true
@@ -298,13 +362,20 @@ object DataBackup {
             Result.Success()
         } catch (e: Exception) {
             Log.e(TAG, "applying import failed; rolling back", e)
-            rollback(live, staging, backup, liveConfig, oldConfig, swapped, liveMoved, configSwapped, configBackedUp)
-            Result.Failure(
-                context.getString(
-                    R.string.backup_error_apply,
-                    e.message ?: context.getString(R.string.backup_error_unknown),
-                ),
+            rollback(
+                live,
+                staging,
+                backup,
+                pendingConfig,
+                liveConfig,
+                oldConfig,
+                swapped,
+                liveMoved,
+                configStaged,
+                configSwapped,
+                configBackedUp,
             )
+            Result.Failure(internalReason(context, e))
         }
     }
 
@@ -313,20 +384,15 @@ object DataBackup {
         live: File,
         staging: File,
         backup: File,
+        pendingConfig: File,
         liveConfig: File,
         oldConfig: File,
         swapped: Boolean,
         liveMoved: Boolean,
+        configStaged: Boolean,
         configSwapped: Boolean,
         configBackedUp: Boolean,
     ) {
-        if (configSwapped) {
-            liveConfig.delete()
-        }
-        if (configBackedUp) {
-            // Put the user's original config back; a no-op when it was never moved.
-            oldConfig.renameTo(liveConfig)
-        }
         if (swapped) {
             // Return the rejected data to staging so a later retry can re-apply it.
             if (!live.renameTo(staging)) live.deleteRecursively()
@@ -336,6 +402,20 @@ object DataBackup {
                 Log.e(TAG, "could not restore ${live.path} from ${backup.path}")
             }
         }
+        if (configSwapped) {
+            // Preserve the archive's config for a retry, then put the user's config back.
+            val stagedConfig = File(staging, CONFIG_NAME)
+            if (!staging.isDirectory || !liveConfig.renameTo(stagedConfig)) {
+                liveConfig.delete()
+            }
+        } else if (configStaged && staging.isDirectory) {
+            // Keep the archive's config with the staged data for a retry.
+            pendingConfig.renameTo(File(staging, CONFIG_NAME))
+        }
+        if (configBackedUp) {
+            // Put the user's original config back; a no-op when it was never moved.
+            oldConfig.renameTo(liveConfig)
+        }
     }
 
     /** Removes staging and the marker after a failed stage attempt. */
@@ -343,6 +423,23 @@ object DataBackup {
         staging.deleteRecursively()
         marker.delete()
     }
+
+    /** Removes a partial SAF document after a failed export; best effort. */
+    private fun discardDocument(context: Context, uri: Uri) {
+        try {
+            DocumentsContract.deleteDocument(context.contentResolver, uri)
+        } catch (e: Exception) {
+            // Non-document providers reject this; the empty file is all we can leave.
+            Log.w(TAG, "could not delete partial export document", e)
+        }
+    }
+
+    /** Chinese lead sentence with the technical detail kept in parentheses. */
+    private fun internalReason(context: Context, e: Exception): String =
+        context.getString(
+            R.string.backup_error_internal,
+            e.message ?: context.getString(R.string.backup_error_unknown),
+        )
 
     /** True when [target]'s canonical path is [root] or a descendant of it. */
     private fun isUnder(root: File, target: File): Boolean {
@@ -366,21 +463,5 @@ object DataBackup {
 
         val normalized = name.replace('\\', '/')
         return normalized.split('/').none { it == ".." }
-    }
-
-    /** Counts the bytes actually written through to the SAF stream. */
-    private class CountingOutputStream(out: OutputStream) : FilterOutputStream(out) {
-        var count: Long = 0L
-            private set
-
-        override fun write(b: Int) {
-            out.write(b)
-            count++
-        }
-
-        override fun write(b: ByteArray, off: Int, len: Int) {
-            out.write(b, off, len)
-            count += len
-        }
     }
 }
