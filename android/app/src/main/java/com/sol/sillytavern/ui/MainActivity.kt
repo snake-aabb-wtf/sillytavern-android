@@ -37,6 +37,7 @@ import com.sol.sillytavern.server.ServerState
 import com.sol.sillytavern.web.WebBridge
 import java.io.File
 import java.io.IOException
+import java.security.SecureRandom
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -70,6 +71,13 @@ class MainActivity : ComponentActivity() {
 
     /** JS bridge exposed as `window.STBridge`; created before the first load. */
     private lateinit var webBridge: WebBridge
+
+    /**
+     * Per-session handshake secret. Only the loopback main frame receives it, so remote
+     * iframes (YouTube, Maps, ...) cannot call the JavascriptInterface even though the
+     * interface itself is visible to every frame.
+     */
+    private val bridgeToken: String = newBridgeToken()
 
     /** Cached contents of assets/blob_bridge.js, read once. */
     private var blobBridgeScript: String? = null
@@ -210,20 +218,24 @@ class MainActivity : ComponentActivity() {
 
     @Suppress("DEPRECATION")
     private fun configureWebView() {
-        webBridge = WebBridge(object : WebBridge.Host {
-            override fun onBlobReady(suggestedName: String, bytes: ByteArray) {
-                launchSave(suggestedName, bytes)
-            }
-
-            override fun onBlobRejected(reason: WebBridge.Rejection) {
-                val message = when (reason) {
-                    WebBridge.Rejection.INVALID_PAYLOAD -> R.string.blob_invalid
-                    WebBridge.Rejection.TOO_LARGE -> R.string.blob_too_large
-                    WebBridge.Rejection.DECODE_FAILED -> R.string.blob_unreadable
+        webBridge = WebBridge(
+            host = object : WebBridge.Host {
+                override fun onBlobReady(suggestedName: String, bytes: ByteArray) {
+                    launchSave(suggestedName, bytes)
                 }
-                Toast.makeText(this@MainActivity, message, Toast.LENGTH_LONG).show()
-            }
-        })
+
+                override fun onBlobRejected(reason: WebBridge.Rejection) {
+                    if (isFinishing || isDestroyed) return
+                    val message = when (reason) {
+                        WebBridge.Rejection.INVALID_PAYLOAD -> R.string.blob_invalid
+                        WebBridge.Rejection.TOO_LARGE -> R.string.blob_too_large
+                        WebBridge.Rejection.DECODE_FAILED -> R.string.blob_unreadable
+                    }
+                    Toast.makeText(this@MainActivity, message, Toast.LENGTH_LONG).show()
+                }
+            },
+            token = bridgeToken,
+        )
         // Attached before loadUrl() so the very first page can export blobs. This is only
         // safe because the WebView is restricted to the loopback page: never expose the
         // interface to arbitrary origins.
@@ -263,7 +275,7 @@ class MainActivity : ComponentActivity() {
             }
 
             override fun onPageFinished(view: WebView, url: String) {
-                if (view.url?.startsWith(LOOPBACK_URL_PREFIX) == true) {
+                if (isLocalPage(url)) {
                     injectBlobBridge(view)
                 }
                 if (!firstPaintPending) return
@@ -298,11 +310,7 @@ class MainActivity : ComponentActivity() {
                 fileChooserCallback?.onReceiveValue(null)
                 fileChooserCallback = filePathCallback
 
-                val intent = Intent(Intent.ACTION_GET_CONTENT).apply {
-                    addCategory(Intent.CATEGORY_OPENABLE)
-                    type = chooserMimeType(fileChooserParams.acceptTypes)
-                    putExtra(Intent.EXTRA_ALLOW_MULTIPLE, false)
-                }
+                val intent = chooserIntent(fileChooserParams.acceptTypes)
                 return try {
                     fileChooserLauncher.launch(
                         Intent.createChooser(intent, getString(R.string.file_chooser_title)),
@@ -330,14 +338,49 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * Character-card import uses `<input type=file>`. ACTION_GET_CONTENT plus a broad
-     * fallback type keeps .png/.json cards selectable regardless of what the page asks for.
+     * Builds the picker intent without ever excluding a mixed accept list.
+     *
+     * Character import asks for `accept=".json, image/png, .yaml, .yml, .charx, .byaf"`;
+     * narrowing the picker to `image/*` (or any single type) would make those cards
+     * unselectable. So the base type is always the wildcard type; `EXTRA_MIME_TYPES` is only
+     * attached when every entry is a real MIME type we can hand to the picker. Unknown
+     * extensions mean "no filter at all".
      */
-    private fun chooserMimeType(acceptTypes: Array<String>?): String {
-        val wantsImage = acceptTypes.orEmpty().any {
-            it.contains("image", ignoreCase = true)
+    private fun chooserIntent(acceptTypes: Array<String>?): Intent {
+        val entries = acceptTypes.orEmpty()
+            .flatMap { it.split(',') }
+            .map { it.trim().substringBefore(';').lowercase() }
+            .filter { it.isNotEmpty() }
+
+        val mimeTypes = entries.mapNotNull(::toStandardMimeType)
+        return Intent(Intent.ACTION_GET_CONTENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+            putExtra(Intent.EXTRA_ALLOW_MULTIPLE, false)
+            if (entries.isNotEmpty() && mimeTypes.size == entries.size) {
+                putExtra(Intent.EXTRA_MIME_TYPES, mimeTypes.distinct().toTypedArray())
+            }
         }
-        return if (wantsImage) "image/*" else "*/*"
+    }
+
+    /** Returns the entry when it is `type/subtype` (wildcards allowed), else null. */
+    private fun toStandardMimeType(entry: String): String? {
+        if (entry.startsWith(".")) return null
+        val slash = entry.indexOf('/')
+        if (slash <= 0 || slash == entry.length - 1) return null
+        val type = entry.substring(0, slash)
+        val subtype = entry.substring(slash + 1)
+        if (!MIME_TOKEN.matches(type)) return null
+        if (subtype != "*" && !MIME_TOKEN.matches(subtype)) return null
+        return entry
+    }
+
+    private fun isLocalPage(url: String?): Boolean {
+        if (url.isNullOrEmpty()) return false
+        val uri = Uri.parse(url)
+        val scheme = uri.scheme?.lowercase()
+        if (scheme != "http" && scheme != "https") return false
+        return isLocalHost(uri.host)
     }
 
     private fun enqueueDownload(url: String, contentDisposition: String?, mimeType: String?) {
@@ -413,6 +456,8 @@ class MainActivity : ComponentActivity() {
             Log.w(TAG, "blob bridge asset missing", e)
             return
         }
+        // The token must exist before the script runs; both calls execute in order.
+        view.evaluateJavascript("window.__stToken='${bridgeToken}';", null)
         view.evaluateJavascript(script, null)
     }
 
@@ -514,6 +559,10 @@ class MainActivity : ComponentActivity() {
         splashFallbackJob?.cancel()
         fileChooserCallback?.onReceiveValue(null)
         fileChooserCallback = null
+        pendingSaveBytes = null
+        if (::webBridge.isInitialized) {
+            webBridge.shutdown()
+        }
         webView.stopLoading()
         webView.removeAllViews()
         webView.destroy()
@@ -524,12 +573,21 @@ class MainActivity : ComponentActivity() {
         const val TAG = "MainActivity"
         const val BRIDGE_NAME = "STBridge"
         const val BLOB_BRIDGE_ASSET = "blob_bridge.js"
-        const val LOOPBACK_URL_PREFIX = "http://127.0.0.1:"
+
+        /** RFC 6838 token: letters, digits and `!#$&^_.+-`; used to validate MIME entries. */
+        val MIME_TOKEN = Regex("^[a-z0-9][a-z0-9!#$&^_.+-]*$")
         const val PREFS_NAME = "sillytavern_prefs"
         const val KEY_NOTIFICATION_PERMISSION_ASKED = "notification_permission_asked"
         const val LOG_ACTIVITY_CLASS = "com.sol.sillytavern.ui.LogActivity"
         const val EXTRA_LOG_PATH = "logPath"
         const val NODE_LOG_RELATIVE_PATH = "logs/node.log"
         const val SPLASH_FALLBACK_MS = 5_000L
+
+        /** 128-bit hex token; unguessable, so only the frame that received it can export. */
+        fun newBridgeToken(): String {
+            val bytes = ByteArray(16)
+            SecureRandom().nextBytes(bytes)
+            return bytes.joinToString("") { "%02x".format(it) }
+        }
     }
 }

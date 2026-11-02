@@ -5,8 +5,8 @@ import android.os.Looper
 import android.util.Base64
 import android.util.Log
 import android.webkit.JavascriptInterface
-import java.net.URLDecoder
-import java.util.concurrent.Executor
+import java.security.MessageDigest
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
 
@@ -19,14 +19,17 @@ import java.util.concurrent.RejectedExecutionException
  * are decoded off the JS thread and handed to the host activity, which writes them through
  * the Storage Access Framework (see [Host]).
  *
- * SECURITY: this interface is attached only to the WebView that loads
- * `http://127.0.0.1:<port>/`. Every script running in that WebView - including third-party
- * frames or user-supplied content that reaches the DOM - can call it. Never add it to a
- * WebView that may display arbitrary origins.
+ * SECURITY: `addJavascriptInterface` exposes the object to *every* frame in the WebView,
+ * including the remote YouTube/Maps iframes SillyTavern embeds. Cross-origin frames cannot
+ * read the parent's `window.__stToken`, so every mutating call carries the per-session token
+ * that MainActivity injects into the loopback main frame only. Calls with a wrong token are
+ * logged and dropped. Never attach this interface to a WebView that may display arbitrary
+ * top-level origins.
  */
 class WebBridge(
     private val host: Host,
-    private val decodeExecutor: Executor = Executors.newSingleThreadExecutor { runnable ->
+    private val token: String,
+    private val decodeExecutor: ExecutorService = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "st-blob-decode").apply { isDaemon = true }
     },
     private val mainHandler: Handler = Handler(Looper.getMainLooper()),
@@ -39,13 +42,13 @@ class WebBridge(
     }
 
     enum class Rejection {
-        /** Payload was not a `data:` URL, or was malformed. */
+        /** Payload was not a `data:` URL, was not base64, or was empty. */
         INVALID_PAYLOAD,
 
         /** Decoded payload exceeds [MAX_BYTES]. */
         TOO_LARGE,
 
-        /** Base64/percent decoding failed. */
+        /** Base64 decoding failed. */
         DECODE_FAILED,
     }
 
@@ -55,7 +58,12 @@ class WebBridge(
      * here at all.
      */
     @JavascriptInterface
-    fun saveBlob(name: String, dataUrl: String) {
+    fun saveBlob(name: String, dataUrl: String, callerToken: String) {
+        if (!tokenMatches(callerToken)) {
+            // Log only: a hostile frame must not be able to drive UI.
+            Log.w(TAG, "rejected blob export without the bridge token")
+            return
+        }
         if (!dataUrl.startsWith(DATA_PREFIX)) {
             reject(Rejection.INVALID_PAYLOAD)
             return
@@ -75,6 +83,21 @@ class WebBridge(
         }
     }
 
+    /**
+     * Reported by the page when the blob itself is already over the cap, so the user gets a
+     * Toast instead of a silently cancelled click. No token: this only shows a message.
+     */
+    @JavascriptInterface
+    fun reportTooLarge(name: String, bytes: Long) {
+        Log.w(TAG, "export too large: $name ($bytes bytes)")
+        reject(Rejection.TOO_LARGE)
+    }
+
+    /** Stops the decode thread; called from the activity's onDestroy(). */
+    fun shutdown() {
+        decodeExecutor.shutdownNow()
+    }
+
     private fun decodeAndDeliver(name: String, dataUrl: String) {
         val bytes = try {
             decodeDataUrl(dataUrl)
@@ -92,6 +115,11 @@ class WebBridge(
             reject(Rejection.TOO_LARGE)
             return
         }
+        if (bytes.isEmpty()) {
+            // "data:...;base64," would otherwise create a 0-byte file and claim success.
+            reject(Rejection.INVALID_PAYLOAD)
+            return
+        }
         mainHandler.post { host.onBlobReady(name, bytes) }
     }
 
@@ -99,18 +127,31 @@ class WebBridge(
         mainHandler.post { host.onBlobRejected(reason) }
     }
 
+    /**
+     * Only `;base64,` data URLs are accepted. Percent-decoded payloads cannot represent
+     * arbitrary binary safely (UTF-8 round-trips corrupt `+`/high bytes), and every producer
+     * in SillyTavern uses FileReader.readAsDataURL.
+     */
     private fun decodeDataUrl(dataUrl: String): ByteArray {
         val comma = dataUrl.indexOf(',')
         require(comma >= DATA_PREFIX.length) { "malformed data URL" }
         val meta = dataUrl.substring(DATA_PREFIX.length, comma)
-        val payload = dataUrl.substring(comma + 1)
-        val isBase64 = meta.split(';').any { it.trim().equals("base64", ignoreCase = true) }
-        return if (isBase64) {
-            // DEFAULT tolerates the line breaks some producers insert.
-            Base64.decode(payload, Base64.DEFAULT)
-        } else {
-            URLDecoder.decode(payload, Charsets.UTF_8.name()).toByteArray(Charsets.UTF_8)
+        require(meta.split(';').any { it.trim().equals("base64", ignoreCase = true) }) {
+            "data URL is not base64 encoded"
         }
+        val payload = dataUrl.substring(comma + 1)
+        require(payload.isNotEmpty()) { "empty payload" }
+        // DEFAULT tolerates the line breaks some producers insert.
+        return Base64.decode(payload, Base64.DEFAULT)
+    }
+
+    /** Constant-time comparison so a wrong token cannot be probed byte by byte. */
+    private fun tokenMatches(callerToken: String): Boolean {
+        if (token.isEmpty() || callerToken.isEmpty()) return false
+        return MessageDigest.isEqual(
+            callerToken.toByteArray(Charsets.UTF_8),
+            token.toByteArray(Charsets.UTF_8),
+        )
     }
 
     companion object {

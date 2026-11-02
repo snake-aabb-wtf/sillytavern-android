@@ -6,6 +6,10 @@
  * a clicked blob download into a data URL and hands it to the native `STBridge.saveBlob`
  * interface, which writes it through the Storage Access Framework.
  *
+ * Every call carries `window.__stToken`, injected by MainActivity into the loopback main
+ * frame only. Remote cross-origin iframes (YouTube, Maps, ...) cannot read it, so the
+ * JavascriptInterface cannot be driven from embedded content.
+ *
  * Non-blob links are left untouched so the normal DownloadListener path still applies.
  * The install is idempotent: MainActivity re-injects the asset on every onPageFinished().
  */
@@ -15,29 +19,54 @@
     if (window.__stBridgeInstalled) return;
 
     var bridge = window.STBridge;
-    if (!bridge || typeof bridge.saveBlob !== 'function') return;
+    var token = window.__stToken;
+    if (!bridge || typeof bridge.saveBlob !== 'function' ||
+        typeof token !== 'string' || token.length === 0) {
+        return;
+    }
 
     window.__stBridgeInstalled = true;
 
     var MAX_BYTES = 64 * 1024 * 1024;
-    var DEFAULT_NAME = 'download.bin';
+    var MAX_RETAINED_BYTES = 128 * 1024 * 1024;
     var MAX_RETAINED = 8;
+    var DEFAULT_NAME = 'download.bin';
 
     /*
      * SillyTavern calls URL.revokeObjectURL() immediately after a.click(). Retaining the
      * Blob behind the URLs we hand out keeps the export alive if the asynchronous fetch
-     * loses that race.
+     * loses that race. Bounded by both entry count and total bytes.
      */
     var retained = new Map();
+    var retainedBytes = 0;
+
+    function release(url) {
+        var blob = retained.get(url);
+        if (!blob) return;
+        retainedBytes -= blob.size;
+        retained.delete(url);
+    }
+
+    function trimRetained() {
+        while (retained.size > 0 &&
+            (retained.size > MAX_RETAINED || retainedBytes > MAX_RETAINED_BYTES)) {
+            release(retained.keys().next().value);
+        }
+    }
+
+    function retain(url, blob) {
+        if (blob.size > MAX_BYTES || retained.has(url)) return;
+        retained.set(url, blob);
+        retainedBytes += blob.size;
+        trimRetained();
+    }
+
     var nativeCreateObjectURL = URL.createObjectURL;
     if (typeof nativeCreateObjectURL === 'function') {
         URL.createObjectURL = function (object) {
             var url = nativeCreateObjectURL.call(URL, object);
-            if (object instanceof Blob && object.size <= MAX_BYTES) {
-                retained.set(url, object);
-                while (retained.size > MAX_RETAINED) {
-                    retained.delete(retained.keys().next().value);
-                }
+            if (object instanceof Blob) {
+                retain(url, object);
             }
             return url;
         };
@@ -58,9 +87,16 @@
         });
     }
 
+    function reportTooLarge(name, size) {
+        console.warn('[STBridge] export exceeds 64 MB, dropped');
+        if (typeof bridge.reportTooLarge === 'function') {
+            bridge.reportTooLarge(name, size);
+        }
+    }
+
     function save(anchor, href) {
         var name = anchor.download || DEFAULT_NAME;
-        var blobPromise = fetch(href)
+        fetch(href)
             .then(function (response) {
                 if (!response.ok) {
                     throw new Error('blob fetch failed: ' + response.status);
@@ -72,13 +108,11 @@
                 var cached = retained.get(href);
                 if (!cached) throw error;
                 return cached;
-            });
-
-        blobPromise
+            })
             .then(function (blob) {
-                retained.delete(href);
+                release(href);
                 if (blob.size > MAX_BYTES) {
-                    console.warn('[STBridge] export exceeds 64 MB, dropped');
+                    reportTooLarge(name, blob.size);
                     return null;
                 }
                 return readAsDataUrl(blob);
@@ -88,10 +122,10 @@
                 if (dataUrl.indexOf('data:') !== 0) {
                     throw new Error('unexpected FileReader output');
                 }
-                bridge.saveBlob(name, dataUrl);
+                bridge.saveBlob(name, dataUrl, token);
             })
             .catch(function (error) {
-                retained.delete(href);
+                release(href);
                 console.error('[STBridge] blob export failed', error);
             });
     }
