@@ -93,12 +93,25 @@ object ServerController {
     /** Monotonic attempt id; stale workers compare against it before mutating state. */
     private val attemptCounter = AtomicInteger(0)
 
+    /** The one Node thread we may have launched; guarded by [rememberNode]/[forgetNode]. */
+    @Volatile
+    private var nodeThread: Thread? = null
+
+    /** Port handed to [nodeThread]; -1 when no Node thread is tracked. */
+    @Volatile
+    private var nodePort: Int = -1
+
     private val _state = MutableStateFlow<ServerState>(ServerState.Idle)
     val state: StateFlow<ServerState> = _state.asStateFlow()
 
     /**
      * Starts the server, or retries after failure. Safe to call repeatedly from
      * `Activity.onCreate` and from a retry button.
+     *
+     * If an earlier attempt timed out but its Node thread is still alive, a retry only
+     * re-enters [awaitReady] on that thread's port. `node::Start()` must never run twice
+     * concurrently in one process, so a fresh Node is started only once the old thread
+     * has exited.
      */
     @Synchronized
     fun start(context: Context) {
@@ -106,24 +119,37 @@ object ServerController {
             ServerState.Installing, ServerState.Starting, is ServerState.Ready -> return
             ServerState.Idle, is ServerState.Failed -> Unit
         }
+        val appContext = context.applicationContext
+
+        val liveThread = nodeThread
+        val livePort = nodePort
+        if (liveThread != null && liveThread.isAlive && livePort > 0) {
+            val attemptId = attemptCounter.incrementAndGet()
+            _state.value = ServerState.Starting
+            scope.launch { resumeWaiting(appContext, attemptId, livePort) }
+            return
+        }
+
         val attemptId = attemptCounter.incrementAndGet()
         _state.value = ServerState.Installing
-        val appContext = context.applicationContext
         scope.launch { begin(appContext, attemptId) }
     }
 
     /**
      * Polls `http://127.0.0.1:[port]/` until it answers 2xx/3xx, at most [timeoutMs].
      *
-     * Suspends on the caller's coroutine and is cancellation-aware between attempts, so
-     * an Activity that cancels its `lifecycleScope` does not leave a poller running. Each
-     * request has a 1 s connect and 1 s read timeout.
+     * Suspends on the caller's coroutine; cancellation is observed between probes and the
+     * per-request timeouts bound the blocking part to about 1 s. The controller calls this
+     * from its app-scoped worker, deliberately **not** from the Activity's scope, so a
+     * destroyed Activity does not abort a server that is still starting. Returns early when
+     * the controller has already reached [ServerState.Failed].
      */
     suspend fun awaitReady(port: Int, timeoutMs: Long = READY_TIMEOUT_MS): Boolean =
         withContext(Dispatchers.IO) {
             val deadlineNanos = System.nanoTime() + timeoutMs.coerceAtLeast(0L) * 1_000_000L
             while (true) {
                 currentCoroutineContext().ensureActive()
+                if (_state.value is ServerState.Failed) return@withContext false
                 if (probeOnce(port)) return@withContext true
                 currentCoroutineContext().ensureActive()
                 val remainingMs = (deadlineNanos - System.nanoTime()) / 1_000_000L
@@ -131,6 +157,24 @@ object ServerController {
                 delay(minOf(POLL_INTERVAL_MS, remainingMs))
             }
         }
+
+    /** Retry path when a previous attempt timed out but its Node thread is still alive. */
+    private suspend fun resumeWaiting(context: Context, attemptId: Int, port: Int) {
+        val logPath = File(context.filesDir, LOG_RELATIVE_PATH).absolutePath
+        val ready = try {
+            awaitReady(port)
+        } catch (t: Throwable) {
+            if (t is CancellationException || t is VirtualMachineError) throw t
+            fail(attemptId, "等待服务器就绪失败：${t.javaClass.simpleName}: ${t.message}", logPath)
+            return
+        }
+        if (!isCurrent(attemptId)) return
+        if (ready) {
+            markReadyIfStarting(attemptId, port)
+        } else {
+            fail(attemptId, "服务器在 ${READY_TIMEOUT_MS / 1000} 秒内未就绪", logPath)
+        }
+    }
 
     private suspend fun begin(context: Context, attemptId: Int) {
         val logPath = File(context.filesDir, LOG_RELATIVE_PATH).absolutePath
@@ -228,15 +272,24 @@ object ServerController {
             return
         }
 
-        val nodeThread = Thread(
-            null,
-            { runNode(args, fd, attemptId, logPath) },
-            "node",
-            NODE_THREAD_STACK_BYTES,
-        )
-        try {
-            nodeThread.start()
+        val thread = try {
+            Thread(
+                null,
+                { runNode(args, fd, logPath) },
+                "node",
+                NODE_THREAD_STACK_BYTES,
+            )
         } catch (t: Throwable) {
+            closeFd(fd)
+            fail(attemptId, "无法创建 Node 线程：${t.message}", logPath)
+            return
+        }
+
+        rememberNode(thread, port)
+        try {
+            thread.start()
+        } catch (t: Throwable) {
+            forgetNode(thread)
             closeFd(fd)
             fail(attemptId, "无法启动 Node 线程：${t.message}", logPath)
             return
@@ -255,7 +308,8 @@ object ServerController {
      * Node's event loop runs here until the process exits. The Kotlin-side log fd is
      * closed only after [NodeBridge.startNode] returns; native code keeps dup2 copies.
      */
-    private fun runNode(args: Array<String>, fd: Int, attemptId: Int, logPath: String) {
+    private fun runNode(args: Array<String>, fd: Int, logPath: String) {
+        val self = Thread.currentThread()
         var exitCode = -1
         try {
             exitCode = NodeBridge.startNode(args, fd)
@@ -265,7 +319,7 @@ object ServerController {
             closeFd(fd)
         }
         Log.i(TAG, "Node exited with code $exitCode")
-        markNodeExited(attemptId, exitCode, logPath)
+        markNodeExited(self, exitCode, logPath)
     }
 
     private fun probeOnce(port: Int): Boolean {
@@ -336,8 +390,25 @@ object ServerController {
     }
 
     @Synchronized
-    private fun markNodeExited(attemptId: Int, exitCode: Int, logPath: String) {
-        if (attemptCounter.get() != attemptId) return
+    private fun rememberNode(thread: Thread, port: Int) {
+        nodeThread = thread
+        nodePort = port
+    }
+
+    @Synchronized
+    private fun forgetNode(thread: Thread) {
+        if (nodeThread === thread) {
+            nodeThread = null
+            nodePort = -1
+        }
+    }
+
+    @Synchronized
+    private fun markNodeExited(thread: Thread, exitCode: Int, logPath: String) {
+        // Identity check: only the tracked thread may clear the slot or fail the state.
+        if (nodeThread !== thread) return
+        nodeThread = null
+        nodePort = -1
         val current = _state.value
         if (current is ServerState.Starting || current is ServerState.Ready) {
             _state.value = ServerState.Failed("Node 进程已退出（code=$exitCode）", logPath)

@@ -4,10 +4,11 @@
 
     <string name="status_installing">正在准备运行环境…</string>
     <string name="status_starting">正在启动 SillyTavern…</string>
+    <string name="status_loading_page">正在加载界面…</string>
     <string name="error_title">启动失败</string>
     <string name="error_view_log">查看日志</string>
     <string name="error_retry">重试</string>
     <string name="error_webview_format">页面加载失败（%1$d）：%2$s</string>
-    <string name="log_unavailable">日志页面尚未提供</string>
+    <string name="log_path_toast">日志文件：%1$s</string>
     <string name="external_browser_unavailable">未找到可打开该链接的应用</string>
 </resources>

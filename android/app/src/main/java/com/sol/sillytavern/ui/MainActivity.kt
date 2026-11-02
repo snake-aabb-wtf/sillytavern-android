@@ -15,11 +15,16 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.lifecycleScope
 import com.sol.sillytavern.BuildConfig
 import com.sol.sillytavern.R
 import com.sol.sillytavern.server.ServerController
 import com.sol.sillytavern.server.ServerState
+import java.io.File
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
@@ -31,6 +36,7 @@ import kotlinx.coroutines.launch
 class MainActivity : ComponentActivity() {
 
     private lateinit var webView: WebView
+    private lateinit var root: View
     private lateinit var splashOverlay: View
     private lateinit var splashStatus: TextView
     private lateinit var errorPanel: View
@@ -39,17 +45,26 @@ class MainActivity : ComponentActivity() {
     /** URL currently requested from the WebView; avoids reloading on state re-emission. */
     private var loadedUrl: String? = null
 
+    /** True between loadUrl() and onPageFinished(); keeps the splash over an unpainted page. */
+    private var firstPaintPending = false
+    private var splashFallbackJob: Job? = null
+
+    /** Log path from [ServerState.Failed], used by the 查看日志 button. */
+    private var lastFailureLogPath: String? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG)
         setContentView(R.layout.activity_main)
 
         webView = findViewById(R.id.webView)
+        root = findViewById(R.id.root)
         splashOverlay = findViewById(R.id.splashOverlay)
         splashStatus = findViewById(R.id.splashStatus)
         errorPanel = findViewById(R.id.errorPanel)
         errorReason = findViewById(R.id.errorReason)
 
+        applyWindowInsets()
         configureWebView()
 
         findViewById<Button>(R.id.buttonViewLog).setOnClickListener { openLog() }
@@ -72,6 +87,24 @@ class MainActivity : ComponentActivity() {
         ServerController.start(this)
     }
 
+    /**
+     * targetSdk 35 enforces edge-to-edge on Android 15: pad the root (and therefore the
+     * splash/error overlays) by the system bars, cutout and IME insets so the WebView and
+     * SillyTavern's composer stay fully reachable.
+     */
+    private fun applyWindowInsets() {
+        ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
+            val bars = insets.getInsets(
+                WindowInsetsCompat.Type.systemBars() or
+                    WindowInsetsCompat.Type.displayCutout() or
+                    WindowInsetsCompat.Type.ime(),
+            )
+            view.setPadding(bars.left, bars.top, bars.right, bars.bottom)
+            insets
+        }
+        ViewCompat.requestApplyInsets(root)
+    }
+
     @Suppress("DEPRECATION")
     private fun configureWebView() {
         webView.settings.apply {
@@ -90,6 +123,8 @@ class MainActivity : ComponentActivity() {
                 view: WebView,
                 request: WebResourceRequest,
             ): Boolean {
+                // Sub-frame navigations must stay in the page, not open the system browser.
+                if (!request.isForMainFrame) return false
                 val url = request.url
                 return when (url.scheme?.lowercase()) {
                     "http", "https" -> {
@@ -100,9 +135,16 @@ class MainActivity : ComponentActivity() {
                             true
                         }
                     }
-                    // Unknown schemes (intent:, mailto:, tel:, ...) stay out of the WebView.
+                    // Top-level non-http(s) navigations (intent:, mailto:, tel:, ...).
                     else -> true
                 }
+            }
+
+            override fun onPageFinished(view: WebView, url: String) {
+                if (!firstPaintPending) return
+                firstPaintPending = false
+                splashFallbackJob?.cancel()
+                splashOverlay.visibility = View.GONE
             }
 
             override fun onReceivedError(
@@ -128,15 +170,20 @@ class MainActivity : ComponentActivity() {
             ServerState.Installing -> showSplash(getString(R.string.status_installing))
             ServerState.Starting -> showSplash(getString(R.string.status_starting))
             is ServerState.Ready -> {
-                splashOverlay.visibility = View.GONE
                 errorPanel.visibility = View.GONE
                 val url = "http://127.0.0.1:${state.port}/"
                 if (loadedUrl != url) {
                     loadedUrl = url
+                    firstPaintPending = true
+                    showSplash(getString(R.string.status_loading_page))
                     webView.loadUrl(url)
+                    scheduleSplashFallback()
                 }
             }
-            is ServerState.Failed -> showError(state.reason)
+            is ServerState.Failed -> {
+                lastFailureLogPath = state.logPath
+                showError(state.reason)
+            }
         }
     }
 
@@ -147,9 +194,22 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun showError(reason: String) {
+        firstPaintPending = false
+        splashFallbackJob?.cancel()
         splashOverlay.visibility = View.GONE
         errorReason.text = reason
         errorPanel.visibility = View.VISIBLE
+    }
+
+    private fun scheduleSplashFallback() {
+        splashFallbackJob?.cancel()
+        splashFallbackJob = lifecycleScope.launch {
+            delay(SPLASH_FALLBACK_MS)
+            if (firstPaintPending) {
+                firstPaintPending = false
+                splashOverlay.visibility = View.GONE
+            }
+        }
     }
 
     private fun retry() {
@@ -157,21 +217,30 @@ class MainActivity : ComponentActivity() {
         if (state is ServerState.Ready) {
             // The server is up but the page failed to load: reload instead of restarting.
             loadedUrl = null
+            firstPaintPending = false
             errorPanel.visibility = View.GONE
             render(state)
         } else {
             showSplash(getString(R.string.status_installing))
             loadedUrl = null
+            firstPaintPending = false
+            lastFailureLogPath = null
             ServerController.start(this)
         }
     }
 
     private fun openLog() {
+        val logPath = lastFailureLogPath ?: File(filesDir, NODE_LOG_RELATIVE_PATH).absolutePath
         try {
-            startActivity(Intent().setClassName(this, LOG_ACTIVITY_CLASS))
+            startActivity(
+                Intent()
+                    .setClassName(this, LOG_ACTIVITY_CLASS)
+                    .putExtra(EXTRA_LOG_PATH, logPath),
+            )
         } catch (e: ActivityNotFoundException) {
-            // Task 11 adds LogActivity; until then explain instead of crashing.
-            Toast.makeText(this, R.string.log_unavailable, Toast.LENGTH_LONG).show()
+            // Task 11 adds LogActivity; until then show the path the user can inspect.
+            Toast.makeText(this, getString(R.string.log_path_toast, logPath), Toast.LENGTH_LONG)
+                .show()
         }
     }
 
@@ -184,9 +253,10 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun isLocalHost(host: String?): Boolean =
-        host == "127.0.0.1" || host == "::1" || host.equals("localhost", ignoreCase = true)
+        host == "127.0.0.1" || host.equals("localhost", ignoreCase = true)
 
     override fun onDestroy() {
+        splashFallbackJob?.cancel()
         webView.stopLoading()
         webView.removeAllViews()
         webView.destroy()
@@ -195,5 +265,8 @@ class MainActivity : ComponentActivity() {
 
     private companion object {
         const val LOG_ACTIVITY_CLASS = "com.sol.sillytavern.ui.LogActivity"
+        const val EXTRA_LOG_PATH = "logPath"
+        const val NODE_LOG_RELATIVE_PATH = "logs/node.log"
+        const val SPLASH_FALLBACK_MS = 5_000L
     }
 }
