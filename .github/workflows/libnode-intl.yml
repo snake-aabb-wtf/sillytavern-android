@@ -1,0 +1,176 @@
+name: Build libnode with ICU
+
+# Builds nodejs-mobile's libnode.so for Android arm64 with `--with-intl=small-icu`.
+# The published npm package is built with `--with-intl=none`, so `\p{...}` regex
+# throws "Invalid property name" and `Intl` is missing. This workflow produces the
+# replacement .so and publishes it as a Release asset consumed by android.yml.
+#
+# Manual only: the build takes tens of minutes and the output rarely changes.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: libnode-intl-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  NODEJS_MOBILE_VERSION: 18.20.4
+  LIBNODE_TAG: libnode-intl-18.20.4
+  # Upstream CI builds with r24/API 24; r26d is the newest NDK known to keep the
+  # legacy `-lgcc`/libunwind layout that Node 18 gyp expects, with r27 as fallback.
+  ANDROID_API: '24'
+
+jobs:
+  build:
+    name: libnode.so (arm64, small-icu)
+    # Node 18's configure only accepts Python 3.6-3.11; ubuntu-latest (24.04)
+    # ships 3.12 and aborts. 22.04 has 3.10.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 300
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The Android SDK, .NET, and Haskell toolchains are unused here and the NDK
+      # plus a full Node/ICU build needs the disk.
+      - name: Free disk space
+        run: |
+          set -euxo pipefail
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost /usr/local/share/chromium \
+            /opt/hostedtoolcache/CodeQL || true
+          sudo apt-get clean
+          df -h /
+
+      - name: Download nodejs-mobile source
+        run: |
+          set -euo pipefail
+          python3 --version
+          gcc --version | head -n 1
+          curl -fsSL --retry 3 -o /tmp/nodejs-mobile.tar.gz \
+            "https://github.com/nodejs-mobile/nodejs-mobile/archive/refs/tags/v${NODEJS_MOBILE_VERSION}.tar.gz"
+          mkdir -p "$RUNNER_TEMP/src"
+          tar -C "$RUNNER_TEMP/src" -xzf /tmp/nodejs-mobile.tar.gz
+          mv "$RUNNER_TEMP/src/nodejs-mobile-${NODEJS_MOBILE_VERSION}" "$RUNNER_TEMP/src/nodejs-mobile"
+          ls "$RUNNER_TEMP/src/nodejs-mobile" | head
+
+      # The only source change: small-icu instead of none. deps/icu-small ships the
+      # ICU 74 sources, so configure needs no download.
+      - name: Enable small-icu
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/src/nodejs-mobile"
+          grep -n 'with-intl=none' android_configure.py
+          sed -i 's/--with-intl=none/--with-intl=small-icu/' android_configure.py
+          # The comment above the os.system call also names the flag, so expect 2.
+          test "$(grep -c -- '--with-intl=small-icu' android_configure.py)" = "2"
+          ! grep -q -- '--with-intl=none' android_configure.py
+          grep -n 'with-intl' android_configure.py
+          test -d deps/icu-small/source/data/in
+
+      - name: Download Android NDK
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          for url in \
+            https://dl.google.com/android/repository/android-ndk-r26d-linux.zip \
+            https://dl.google.com/android/repository/android-ndk-r27c-linux.zip
+          do
+            echo "Trying $url"
+            if curl -fSL --retry 3 --retry-delay 5 -o ndk.zip "$url"; then
+              if unzip -q ndk.zip; then
+                break
+              fi
+            fi
+            rm -f ndk.zip
+          done
+          test -f ndk.zip
+          NDK_DIR="$(find "$RUNNER_TEMP" -maxdepth 1 -type d -name 'android-ndk-*' | head -n 1)"
+          test -n "$NDK_DIR"
+          echo "NDK_DIR=$NDK_DIR" >> "$GITHUB_ENV"
+          cat "$NDK_DIR/source.properties"
+
+      # tools/android_build.sh runs ./android-configure (which runs ./configure with
+      # --with-intl=small-icu) and then `make -j`. The log is kept for diagnosis.
+      - name: Build libnode for arm64
+        working-directory: ${{ runner.temp }}/src/nodejs-mobile
+        run: |
+          set -euo pipefail
+          bash tools/android_build.sh "$NDK_DIR" "$ANDROID_API" arm64 2>&1 | tee "$RUNNER_TEMP/build.log"
+          echo "build finished at $(date -u +%FT%TZ)"
+
+      - name: Verify ICU is really enabled
+        working-directory: ${{ runner.temp }}/src/nodejs-mobile
+        run: |
+          set -euo pipefail
+          SO=out_android/arm64-v8a/libnode.so
+          test -s "$SO"
+          SIZE=$(stat -c %s "$SO")
+          echo "libnode.so size: $SIZE bytes ($(du -h "$SO" | cut -f1))"
+          test "$SIZE" -gt 41943040
+          # configure writes config.gypi at the source root; out/Release is only a
+          # fallback for builds that copy it there.
+          CFG=config.gypi
+          [[ -f "$CFG" ]] || CFG=out/Release/config.gypi
+          [[ -f "$CFG" ]] || CFG=out/config.gypi
+          test -f "$CFG"
+          echo "config: $CFG"
+          grep -qE "['\"]v8_enable_i18n_support['\"]: 1" "$CFG"
+          grep -qE "['\"]icu_small['\"]: ['\"]?true" "$CFG"
+          grep -n 'i18n\|icu_small' "$CFG"
+          # `strings | grep -q` can die of SIGPIPE under pipefail, so materialize it.
+          strings -a "$SO" > "$RUNNER_TEMP/libnode.strings"
+          grep -c 'icudt' "$RUNNER_TEMP/libnode.strings"
+          grep -q 'icudt' "$RUNNER_TEMP/libnode.strings"
+          grep -q 'Intl' "$RUNNER_TEMP/libnode.strings" || true
+          cp "$SO" "$RUNNER_TEMP/libnode.so"
+          cp "$CFG" "$RUNNER_TEMP/config.gypi"
+          readelf -d "$SO" | grep NEEDED || true
+          file "$SO" || true
+
+      # `always()` so a failed assertion still leaves the .so for inspection;
+      # the Release step below is gated by the verification step.
+      - name: Upload build artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: libnode-intl-arm64
+          path: |
+            ${{ runner.temp }}/libnode.so
+            ${{ runner.temp }}/config.gypi
+            ${{ runner.temp }}/build.log
+          if-no-files-found: warn
+          retention-days: 30
+
+      # Kept even when a build/verify step fails, so the failure is diagnosable
+      # without fetching API logs.
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: libnode-build-log
+          path: ${{ runner.temp }}/build.log
+          if-no-files-found: ignore
+          retention-days: 14
+
+      # Published as a stable asset URL so android.yml can fetch it by tag.
+      - name: Publish Release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.LIBNODE_TAG }}
+          name: libnode ${{ env.NODEJS_MOBILE_VERSION }} (Android arm64, small-icu)
+          body: |
+            libnode.so built from nodejs-mobile v${{ env.NODEJS_MOBILE_VERSION }} for
+            Android arm64 with `--with-intl=small-icu` (`v8_enable_i18n_support: 1`).
+
+            Replaces the npm package's `--with-intl=none` build, which lacks `Intl`
+            and throws `SyntaxError: Invalid property name` for `\p{...}` regexes.
+
+            Build: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          files: ${{ runner.temp }}/libnode.so
+          fail_on_unmatched_files: true
+          overwrite_files: true
