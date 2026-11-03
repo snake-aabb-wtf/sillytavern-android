@@ -147,6 +147,12 @@ export async function createBuilder({ dataDir, port, serverDir = DEFAULT_SERVER_
     let captured = null;
     let resolveCapture = null;
     let rejectCapture = null;
+    // While a build is in flight the client still runs its normal
+    // post-generation path (it appends the intercepted assistant reply and
+    // calls saveChatConditional). Those writes must never reach the real chat
+    // file: the reply is a canned stub, not the provider's answer. Saves are
+    // answered locally instead of being persisted and then undone.
+    let blockChatWrites = false;
 
     try {
         await waitForServer(child, baseUrl);
@@ -157,6 +163,13 @@ export async function createBuilder({ dataDir, port, serverDir = DEFAULT_SERVER_
             publicDir: path.join(serverDir, 'public'),
             onLog: log,
             intercept: (url, init) => {
+                if (blockChatWrites && /\/api\/chats\/(group\/)?save(?:[?#]|$)/.test(url)) {
+                    // Pretend the save succeeded, exactly like the real route.
+                    return new Response(JSON.stringify({ ok: true }), {
+                        status: 200,
+                        headers: { 'content-type': 'application/json' },
+                    });
+                }
                 if (url.includes(GENERATE_PATH)) {
                     let body;
                     try {
@@ -262,6 +275,25 @@ export async function createBuilder({ dataDir, port, serverDir = DEFAULT_SERVER_
         textarea.value = userInput;
         textarea.dispatchEvent(new window.Event('input', { bubbles: true }));
 
+        // Roll back the client's own bookkeeping: the activation sends a real
+        // user message, receives the canned SSE stub, and runs the normal
+        // post-generation path (append reply, save chat, save settings). The
+        // snapshot plus the save block above leave both memory and disk at the
+        // pre-send state, so the next build sees the user's real history.
+        const chatSnapshot = JSON.parse(JSON.stringify(ctx().chat ?? []));
+        const metadataSnapshot = JSON.parse(JSON.stringify(ctx().chatMetadata ?? {}));
+        const restoreChatState = () => {
+            const liveChat = ctx().chat;
+            if (Array.isArray(liveChat)) {
+                liveChat.splice(0, liveChat.length, ...chatSnapshot);
+            }
+            const liveMetadata = ctx().chatMetadata;
+            if (liveMetadata && typeof liveMetadata === 'object') {
+                for (const key of Object.keys(liveMetadata)) delete liveMetadata[key];
+                Object.assign(liveMetadata, metadataSnapshot);
+            }
+        };
+
         const capturedPromise = new Promise((resolve, reject) => {
             resolveCapture = resolve;
             rejectCapture = reject;
@@ -269,14 +301,45 @@ export async function createBuilder({ dataDir, port, serverDir = DEFAULT_SERVER_
 
         const sendButton = window.document.querySelector('#send_but');
         if (!sendButton) throw new Error('#send_but is missing');
-        sendButton.click();
 
-        const timeout = delay(timeoutMs).then(() => {
-            throw new Error(`No ${GENERATE_PATH} request was assembled within ${timeoutMs}ms`);
-        });
+        blockChatWrites = true;
+        let record;
+        try {
+            sendButton.click();
 
-        if (captured) return captured;
-        return await Promise.race([capturedPromise, timeout]);
+            const timeout = delay(timeoutMs).then(() => {
+                throw new Error(`No ${GENERATE_PATH} request was assembled within ${timeoutMs}ms`);
+            });
+
+            record = captured ?? await Promise.race([capturedPromise, timeout]);
+
+            // The fetch intercept resolves before the client consumes the
+            // stub. Wait for the generation flag to drop so the late append and
+            // blocked save have both happened before the rollback.
+            if (typeof host.app?.isGenerating === 'function') {
+                try {
+                    await host.waitFor(() => !host.app.isGenerating(), {
+                        timeoutMs: 30_000,
+                        label: 'generation to settle',
+                    });
+                } catch (error) {
+                    log(`[builder] generation did not settle: ${error?.message || error}`);
+                }
+            }
+            // Drain the microtask/queue tail that follows unblockGeneration.
+            await delay(25);
+        } finally {
+            try {
+                restoreChatState();
+            } catch (error) {
+                log(`[builder] could not restore chat state: ${error?.message || error}`);
+            }
+            blockChatWrites = false;
+            resolveCapture = null;
+            rejectCapture = null;
+        }
+
+        return record;
     }
 
     async function close() {

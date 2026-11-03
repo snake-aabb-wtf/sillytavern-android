@@ -106,6 +106,21 @@ async function* iterateBody(body) {
     }
 }
 
+const MAX_ERROR_BODY_BYTES = 64 * 1024;
+
+/** Collects a bounded upstream body so an error can be relayed verbatim. */
+async function collectBody(body, limit = MAX_ERROR_BODY_BYTES) {
+    const chunks = [];
+    let size = 0;
+    for await (const chunk of iterateBody(body)) {
+        const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        chunks.push(buffer);
+        size += buffer.length;
+        if (size >= limit) break;
+    }
+    return Buffer.concat(chunks);
+}
+
 /* ------------------------------------------------------------------ */
 /* Router                                                              */
 /* ------------------------------------------------------------------ */
@@ -204,9 +219,15 @@ export function createNativeChatRouter({ builder, forward, log = console.info })
 
         let upstream;
         try {
+            // The route only speaks SSE. The builder always asks for a stream,
+            // but enforce it here so a body change cannot turn the response
+            // into a single JSON object that the native client would wait on.
+            const forwardBody = built.body && typeof built.body === 'object'
+                ? { ...built.body, stream: true }
+                : built.body;
             upstream = await forward({
                 url: built.url,
-                body: built.body,
+                body: forwardBody,
                 headers,
                 signal: controller.signal,
             });
@@ -217,7 +238,25 @@ export function createNativeChatRouter({ builder, forward, log = console.info })
             return;
         }
 
-        const contentType = headerValue(upstream.headers, 'content-type') ?? 'text/event-stream';
+        const contentType = headerValue(upstream.headers, 'content-type') ?? '';
+        if (!/text\/event-stream/i.test(contentType)) {
+            // Never pass a JSON error off as a stream: the client would see a
+            // clean 200 with no [DONE]. Relay the upstream body verbatim, but
+            // with a failure status and its real content-type.
+            let body = Buffer.alloc(0);
+            try {
+                body = await collectBody(upstream.body);
+            } catch {
+                // An unreadable error body does not change the verdict.
+            }
+            log(`[native] provider returned non-SSE ${JSON.stringify(contentType)} after ${Date.now() - startedAt}ms; answering 502`);
+            res.statusCode = 502;
+            res.setHeader('content-type', contentType || 'application/json; charset=utf-8');
+            res.setHeader('x-upstream-status', String(upstream.status ?? 0));
+            res.end(body);
+            return;
+        }
+
         res.statusCode = upstream.status ?? 200;
         res.setHeader('content-type', contentType);
         res.setHeader('cache-control', 'no-cache, no-transform');
@@ -225,6 +264,7 @@ export function createNativeChatRouter({ builder, forward, log = console.info })
         if (typeof res.flushHeaders === 'function') res.flushHeaders();
 
         let firstChunkAt = null;
+        let streamFailure = null;
         try {
             for await (const chunk of iterateBody(upstream.body)) {
                 if (controller.signal.aborted) break;
@@ -247,7 +287,18 @@ export function createNativeChatRouter({ builder, forward, log = console.info })
             }
         } catch (error) {
             if (!controller.signal.aborted) {
-                log(`[native] stream failed after ${Date.now() - startedAt}ms: ${error?.message || error}`);
+                streamFailure = String(error?.message || error);
+                log(`[native] stream failed after ${Date.now() - startedAt}ms: ${streamFailure}`);
+                // Headers are already out. A terminal SSE error frame is the
+                // only in-band signal left; without it a truncated stream looks
+                // like a completed reply.
+                if (!res.writableEnded) {
+                    try {
+                        res.write(`event: error\ndata: ${JSON.stringify({ error: `upstream stream failed: ${streamFailure}` })}\n\n`);
+                    } catch {
+                        // Client already gone.
+                    }
+                }
             }
         } finally {
             if (!res.writableEnded) res.end();

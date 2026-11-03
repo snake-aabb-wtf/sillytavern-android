@@ -110,7 +110,7 @@ test('streams the provider chunks as text/event-stream and ends with [DONE]', as
         // And forward receives the exact url/body the builder produced.
         assert.equal(forwards.length, 1);
         assert.equal(forwards[0].url, '/api/backends/chat-completions/generate');
-        assert.deepEqual(forwards[0].body, { model: 'x', messages: [] });
+        assert.deepEqual(forwards[0].body, { model: 'x', messages: [], stream: true });
     } finally {
         await app.close();
     }
@@ -140,6 +140,69 @@ test('returns 400 JSON when user_input is empty', async () => {
         const payload = await response.json();
         assert.match(payload.error, /user_input/);
         assert.equal(builds.length, 0);
+    } finally {
+        await app.close();
+    }
+});
+
+test('forces stream:true and rejects a non-SSE upstream with 502', async () => {
+    const forwards = [];
+    const app = await listen(createNativeChatRouter({
+        builder: fakeBuilder([], { url: '/api/backends/chat-completions/generate', body: { model: 'x', stream: false, messages: [] } }),
+        forward: async request => {
+            forwards.push(request);
+            return {
+                status: 200,
+                headers: { 'content-type': 'application/json' },
+                body: (async function* stream() {
+                    yield Buffer.from('{"error":"provider said no"}');
+                })(),
+            };
+        },
+    }));
+
+    try {
+        const response = await fetch(app.url, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ avatar_url: AVATAR, file_name: CHAT, user_input: INPUT, type: 'send' }),
+        });
+
+        assert.equal(forwards[0].body.stream, true, 'the built body must be forced to stream:true');
+        assert.equal(response.status, 502);
+        assert.match(response.headers.get('content-type') ?? '', /application\/json/);
+        assert.equal(response.headers.get('x-upstream-status'), '200');
+        assert.match(await response.text(), /provider said no/);
+    } finally {
+        await app.close();
+    }
+});
+
+test('emits a terminal error frame when the upstream fails mid-stream', async () => {
+    const app = await listen(createNativeChatRouter({
+        builder: fakeBuilder([]),
+        forward: async () => ({
+            status: 200,
+            headers: { 'content-type': 'text/event-stream' },
+            body: (async function* stream() {
+                yield Buffer.from(CHUNKS[0]);
+                throw new Error('socket exploded');
+            })(),
+        }),
+    }));
+
+    try {
+        const response = await fetch(app.url, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ avatar_url: AVATAR, file_name: CHAT, user_input: INPUT, type: 'send' }),
+        });
+
+        assert.equal(response.status, 200);
+        const body = await response.text();
+        assert.match(body, /^event: error$/m, 'missing terminal SSE error event');
+        assert.match(body, /socket exploded/);
+        assert.equal(body.includes('[DONE]'), false, 'a failed stream must not look completed');
     } finally {
         await app.close();
     }

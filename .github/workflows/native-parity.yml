@@ -69,9 +69,9 @@ jobs:
   # buried behind the 7-minute Playwright capture. Prints cold boot and
   # per-request time-to-first-byte; the 3000 ms budget is reported, not enforced.
   native-latency:
-    name: Measure /api/native/chat latency
+    name: Measure latency and chat isolation
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -92,6 +92,12 @@ jobs:
       - name: Measure /api/native/chat latency
         working-directory: native
         run: node test/latency-native-chat.mjs
+
+      # Finding 1: build() must not leak the canned SSE reply into the chat or
+      # write it to disk, or the next prompt replays "ok" as real history.
+      - name: Assert chat state survives two builds unchanged
+        working-directory: native
+        run: node test/chat-state-isolation.mjs
 
   # Proves the shipped artifact, not just the sources: stage-runtime.sh applies
   # the native/ overlay to dist/runtime/server and appends the mount to the
