@@ -35,6 +35,14 @@ const SECOND_USER_INPUT = 'And are green apples usually sour?';
 const PERSISTED_REPLY = 'Not every apple is red. Green apples are usually sour.';
 const trace = message => process.stderr.write(`[isolation] ${message}\n`);
 
+// The client fires UI promises it never awaits (PromptManager re-renders after
+// a CHAT_LOADED, settings saves, ...). Closing the builder can leave one in
+// flight, and Node would abort the whole test on the rejection before the
+// explicit exit below. Report it; the assertions decide the verdict.
+process.on('unhandledRejection', error => {
+    trace(`unhandled rejection: ${error?.stack || error}`);
+});
+
 // createBuilder() installs a jsdom fetch wrapper process-wide; keep the real
 // one for the HTTP calls this test makes on its own behalf.
 const REAL_FETCH = globalThis.fetch.bind(globalThis);

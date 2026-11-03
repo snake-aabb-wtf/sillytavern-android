@@ -40,6 +40,28 @@ export const SSE_BODY = 'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata:
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
+/**
+ * Canonical form for comparing chat metadata. Key order is irrelevant, and the
+ * per-session `integrity` uuid is excluded: it is generated client-side when a
+ * file has none and says nothing about whether the chat changed.
+ */
+function canonicalManifest(value) {
+    if (Array.isArray(value)) return value.map(canonicalManifest);
+    if (value && typeof value === 'object') {
+        return Object.fromEntries(Object.keys(value).sort().map(key => [key, canonicalManifest(value[key])]));
+    }
+    return value;
+}
+
+function sameManifest(left, right) {
+    const strip = metadata => {
+        const copy = { ...(metadata && typeof metadata === 'object' ? metadata : {}) };
+        delete copy.integrity;
+        return copy;
+    };
+    return JSON.stringify(canonicalManifest(strip(left))) === JSON.stringify(canonicalManifest(strip(right)));
+}
+
 async function getFreePort() {
     const server = net.createServer();
     await new Promise((resolve, reject) => {
@@ -147,12 +169,16 @@ export async function createBuilder({ dataDir, port, serverDir = DEFAULT_SERVER_
     let captured = null;
     let resolveCapture = null;
     let rejectCapture = null;
-    // While a build is in flight the client still runs its normal
-    // post-generation path (it appends the intercepted assistant reply and
-    // calls saveChatConditional). Those writes must never reach the real chat
-    // file: the reply is a canned stub, not the provider's answer. Saves are
-    // answered locally instead of being persisted and then undone.
-    let blockChatWrites = false;
+    // The client runs its normal post-generation path against the canned SSE
+    // stub: it appends the reply and calls saveChatConditional, and a debounced
+    // save can fire after build() has already returned. None of those writes
+    // may reach the real chat file - the reply is a stub, not the provider's
+    // answer - so every page-originated chat save is answered locally. The
+    // caller's own saves go through its own HTTP client, not this wrapper.
+
+    // Chat identity of the state currently loaded into the client. Used to skip
+    // CHAT_CHANGED/CHAT_LOADED work when a turn reloads the same unchanged chat.
+    let lastChatKey = null;
 
     try {
         await waitForServer(child, baseUrl);
@@ -163,7 +189,7 @@ export async function createBuilder({ dataDir, port, serverDir = DEFAULT_SERVER_
             publicDir: path.join(serverDir, 'public'),
             onLog: log,
             intercept: (url, init) => {
-                if (blockChatWrites && /\/api\/chats\/(group\/)?save(?:[?#]|$)/.test(url)) {
+                if (/\/api\/chats\/(group\/)?save(?:[?#]|$)/.test(url)) {
                     // Pretend the save succeeded, exactly like the real route.
                     return new Response(JSON.stringify({ ok: true }), {
                         status: 200,
@@ -171,6 +197,7 @@ export async function createBuilder({ dataDir, port, serverDir = DEFAULT_SERVER_
                     });
                 }
                 if (url.includes(GENERATE_PATH)) {
+                    log(`[builder] captured generate request (pending=${Boolean(resolveCapture)})`);
                     let body;
                     try {
                         body = JSON.parse(String(init.body ?? ''));
@@ -235,13 +262,90 @@ export async function createBuilder({ dataDir, port, serverDir = DEFAULT_SERVER_
     }
 
     /**
+     * Loads one chat into the client's state without reloadCurrentChat().
+     *
+     * reloadCurrentChat() -> clearChat() -> getChat() -> getChatResult()
+     * clears the transcript and then calls printMessages(), which re-renders
+     * every message (markdown + DOMPurify per message) inside jsdom. None of
+     * that DOM feeds the /generate body: prompt assembly reads the `chat`,
+     * `chat_metadata` and extension-prompt state. This mirrors the state part
+     * of getChat()/getChatResult() (script.js:7634-7710) and skips the render.
+     *
+     * Returns false when the chat has no messages, so the caller can fall back
+     * to the full client path (which materialises the first message).
+     */
+    async function loadChatState({ character, index, fileName }) {
+        const startedAt = performance.now();
+        const context = ctx();
+        const response = await window.fetch('/api/chats/get', {
+            method: 'POST',
+            headers: context.getRequestHeaders(),
+            cache: 'no-cache',
+            body: JSON.stringify({
+                ch_name: character.name,
+                file_name: fileName,
+                avatar_url: character.avatar,
+            }),
+        });
+        if (!response.ok) throw new Error(`POST /api/chats/get failed (${response.status})`);
+        const data = await response.json();
+        const fetchedAt = performance.now();
+        if (!Array.isArray(data) || data.length === 0) return false;
+
+        const header = data.shift() ?? {};
+        const nextMetadata = header.chat_metadata && typeof header.chat_metadata === 'object'
+            ? header.chat_metadata
+            : {};
+        const metadata = context.chatMetadata;
+        const key = `${index}:${fileName}`;
+        // reloadCurrentChat() emits CHAT_CHANGED on every load. Those handlers
+        // (persona selection, preset auto-pick, chat-lorebook pre-cache, ...)
+        // only need to run when the chat or its metadata actually changed: the
+        // real UI does not reload at all between two turns of one chat, so
+        // re-notifying would apply work that belongs to a chat switch.
+        const notify = key !== lastChatKey || !sameManifest(metadata, nextMetadata);
+        const previousIntegrity = metadata?.integrity;
+
+        const liveChat = context.chat;
+        liveChat.splice(0, liveChat.length, ...data);
+        for (const message of data) context.ensureMessageMediaIsArray?.(message);
+
+        if (metadata && typeof metadata === 'object') {
+            for (const k of Object.keys(metadata)) delete metadata[k];
+            Object.assign(metadata, nextMetadata);
+            if (!metadata.integrity && previousIntegrity) metadata.integrity = previousIntegrity;
+            if (!metadata.integrity && typeof context.uuidv4 === 'function') metadata.integrity = context.uuidv4();
+        }
+        if (notify) {
+            // clearChat() resets extension prompts on a real reload; extensions
+            // re-add theirs from CHAT_CHANGED/CHAT_LOADED below.
+            const extensionPrompts = context.extensionPrompts;
+            if (extensionPrompts && typeof extensionPrompts === 'object') {
+                for (const k of Object.keys(extensionPrompts)) delete extensionPrompts[k];
+            }
+        }
+        const appliedAt = performance.now();
+
+        if (notify && context.eventTypes && context.eventSource) {
+            await context.eventSource.emit(context.eventTypes.CHAT_CHANGED, context.chatId);
+            await context.eventSource.emit(context.eventTypes.CHAT_LOADED, { detail: { id: index, character } });
+        }
+        lastChatKey = key;
+        const eventsAt = performance.now();
+        log(`[builder] chat load (ms): fetch=${Math.round(fetchedAt - startedAt)} ` +
+            `apply=${Math.round(appliedAt - fetchedAt)} events=${Math.round(eventsAt - appliedAt)} ` +
+            `notify=${notify} messages=${data.length}`);
+        return true;
+    }
+
+    /**
      * @param {object} options
      * @param {string} options.avatarUrl Character avatar file name, e.g. "Fixture Plain.png".
      * @param {string} options.fileName Chat file name without extension.
      * @param {string} options.userInput Text to send.
      * @param {string} [options.type] Generation type; the capture used "normal".
      * @param {number} [options.timeoutMs]
-     * @returns {Promise<{url: string, body: object}>}
+     * @returns {Promise<{url: string, body: object, timings: object}>}
      */
     async function build({ avatarUrl, fileName, userInput, type = 'normal', timeoutMs = 180_000 }) {
         if (type !== 'normal') {
@@ -251,11 +355,23 @@ export async function createBuilder({ dataDir, port, serverDir = DEFAULT_SERVER_
             throw new Error(`build(): unsupported type ${JSON.stringify(type)}; only "normal" is implemented`);
         }
 
+        // Phase marks. The client is a jsdom singleton, so "how long did the
+        // turn take" is only actionable split by stage: reloading/rendering a
+        // chat and assembling the prompt have completely different fixes.
+        const startedAt = performance.now();
+        const marks = {};
+        const mark = name => {
+            marks[name] = performance.now();
+        };
+        mark('start');
+
         await host.waitFor(() => Array.isArray(ctx().characters) && ctx().characters.length > 0, {
             timeoutMs: 60_000,
             label: 'characters to load',
         });
+        mark('characters');
         await ensureOnline();
+        mark('online');
 
         const characters = ctx().characters;
         const index = characters.findIndex(character => character.avatar === avatarUrl);
@@ -264,29 +380,51 @@ export async function createBuilder({ dataDir, port, serverDir = DEFAULT_SERVER_
         }
 
         const alreadySelected = String(ctx().characterId) === String(index);
-        characters[index].chat = fileName;
-        await ctx().selectCharacterById(index, { switchMenu: false });
+        const character = characters[index];
+        character.chat = fileName;
 
-        // selectCharacterById only re-reads the chat when the selected character
-        // changes (script.js:889-908). This builder is memoised for the whole
-        // server lifetime, so without an explicit reload turn 2 would reuse the
-        // restored in-memory array and silently drop anything persisted between
-        // turns (a real assistant reply saved by the caller).
         if (alreadySelected) {
-            const reload = ctx().reloadCurrentChat;
-            if (typeof reload !== 'function') throw new Error('reloadCurrentChat is not available; cannot reload the chat for this turn');
-            await reload();
+            // Cached selection: select_selected_character() rewrites the whole
+            // character editor (~40 jQuery writes) and schedules a settings
+            // save, none of which reaches the prompt. Skip it.
+            mark('select');
+            // selectCharacterById only re-reads the chat when the selected
+            // character changes (script.js:889-908). This builder is memoised
+            // for the whole server lifetime, so without an explicit reload
+            // turn 2 would reuse the restored in-memory array and silently drop
+            // anything persisted between turns (a real assistant reply saved by
+            // the caller).
+            const loaded = await loadChatState({ character, index, fileName });
+            if (!loaded) {
+                // Empty chat: the real path materialises the greeting; keep it
+                // (and its save) rather than inventing a different history.
+                const reload = ctx().reloadCurrentChat;
+                if (typeof reload !== 'function') throw new Error('reloadCurrentChat is not available; cannot reload the chat for this turn');
+                await reload();
+                lastChatKey = `${index}:${fileName}`;
+            }
+            mark('chat');
+        } else {
+            // A real character switch goes through the client, because only it
+            // owns this_chid. That path loads the chat via getChat() (first
+            // turn only; later turns take the branch above).
+            await ctx().selectCharacterById(index, { switchMenu: false });
+            lastChatKey = `${index}:${fileName}`;
+            mark('select');
+            mark('chat');
         }
 
         await host.waitFor(() => Array.isArray(ctx().chat) && ctx().chat.length >= 2, {
             timeoutMs: 60_000,
             label: 'fixture chat to load',
         });
+        mark('chatReady');
 
         const textarea = window.document.querySelector('#send_textarea');
         if (!textarea) throw new Error('#send_textarea is missing');
         textarea.value = userInput;
         textarea.dispatchEvent(new window.Event('input', { bubbles: true }));
+        mark('input');
 
         // Roll back the client's own bookkeeping: the activation sends a real
         // user message, receives the canned SSE stub, and runs the normal
@@ -315,16 +453,18 @@ export async function createBuilder({ dataDir, port, serverDir = DEFAULT_SERVER_
         const sendButton = window.document.querySelector('#send_but');
         if (!sendButton) throw new Error('#send_but is missing');
 
-        blockChatWrites = true;
         let record;
         try {
+            log(`[builder] clicking send (generating=${host.app?.isGenerating?.()})`);
             sendButton.click();
+            mark('click');
 
             const timeout = delay(timeoutMs).then(() => {
                 throw new Error(`No ${GENERATE_PATH} request was assembled within ${timeoutMs}ms`);
             });
 
             record = captured ?? await Promise.race([capturedPromise, timeout]);
+            mark('capture');
 
             // The fetch intercept resolves before the client consumes the
             // stub. Wait for the generation flag to drop so the late append and
@@ -339,18 +479,37 @@ export async function createBuilder({ dataDir, port, serverDir = DEFAULT_SERVER_
                     log(`[builder] generation did not settle: ${error?.message || error}`);
                 }
             }
+            mark('generation');
             // Drain the microtask/queue tail that follows unblockGeneration.
             await delay(25);
+            mark('settle');
         } finally {
             try {
                 restoreChatState();
             } catch (error) {
                 log(`[builder] could not restore chat state: ${error?.message || error}`);
             }
-            blockChatWrites = false;
             resolveCapture = null;
             rejectCapture = null;
         }
+
+        mark('restore');
+        record.timings = {
+            characters: marks.characters - marks.start,
+            online: marks.online - marks.characters,
+            select: marks.select - marks.online,
+            chat: marks.chat - marks.select,
+            chatReady: marks.chatReady - marks.chat,
+            input: marks.input - marks.chatReady,
+            assemble: marks.capture - marks.input,
+            generation: marks.generation - marks.capture,
+            drain: marks.settle - marks.generation,
+            restore: marks.restore - marks.settle,
+            total: marks.restore - startedAt,
+        };
+        log(`[builder] build phases (ms): ${Object.entries(record.timings)
+            .map(([name, value]) => `${name}=${Math.round(value)}`)
+            .join(' ')}`);
 
         return record;
     }

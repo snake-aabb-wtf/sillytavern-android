@@ -347,19 +347,39 @@ let defaultBuilderPromise = null;
  * One builder for the process. serverDir is the staged runtime root that owns
  * this file (native/endpoints -> ../..). Lazy so importing the module in a
  * unit test never spawns a server.
+ *
+ * The builder runs in a worker thread: assembling a prompt drives jsdom
+ * synchronously for a second or more, and on the main thread that would stall
+ * every other request (health checks, static files, a concurrent provider
+ * forward). The route only exchanges messages with the worker; SSE forwarding
+ * stays here. NATIVE_CHAT_BUILDER=inline restores the in-process builder for
+ * diagnosis.
  */
 export function getDefaultBuilder() {
     if (!defaultBuilderPromise) {
         defaultBuilderPromise = (async () => {
-            const { createBuilder } = await import('../prompt-builder/index.mjs');
             const dataDir = globalThis.DATA_ROOT;
             if (!dataDir) throw new Error('globalThis.DATA_ROOT is not set; cannot start the prompt builder');
             const serverDir = path.resolve(HERE, '../..');
-            return createBuilder({
-                dataDir,
-                serverDir,
-                onLog: line => console.info(`[native-builder] ${line}`),
-            });
+            const onLog = line => console.info(`[native-builder] ${line}`);
+
+            if (process.env.NATIVE_CHAT_BUILDER === 'inline') {
+                const { createBuilder } = await import('../prompt-builder/index.mjs');
+                return createBuilder({ dataDir, serverDir, onLog });
+            }
+
+            try {
+                const { createWorkerBuilder } = await import('../prompt-builder/worker-client.mjs');
+                const builder = createWorkerBuilder({ dataDir, serverDir, onLog });
+                await builder.ready();
+                return builder;
+            } catch (error) {
+                // A runtime without usable worker_threads still gets a working
+                // route; it only loses event-loop isolation between turns.
+                console.warn(`[native] prompt builder worker unavailable (${error?.message || error}); using the in-process builder`);
+                const { createBuilder } = await import('../prompt-builder/index.mjs');
+                return createBuilder({ dataDir, serverDir, onLog });
+            }
         })();
         defaultBuilderPromise.catch(() => { defaultBuilderPromise = null; });
     }
@@ -411,7 +431,10 @@ export function warmDefaultBuilder({ port = globalThis.COMMAND_LINE_ARGS?.port ?
         }
         try {
             const startedAt = Date.now();
-            await getDefaultBuilder();
+            const builder = await getDefaultBuilder();
+            // The worker builder resolves this itself; keep the call so a
+            // future builder with a lazy boot still warms fully here.
+            await builder.ready?.();
             log(`[native] prompt builder warm in ${Date.now() - startedAt}ms`);
         } catch (error) {
             // Do not retry-storm: the first request will try again and report

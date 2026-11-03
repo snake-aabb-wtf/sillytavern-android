@@ -66,8 +66,10 @@ jobs:
           retention-days: 14
 
   # R5 probe in its own job so it starts immediately and its logs are not
-  # buried behind the 7-minute Playwright capture. Prints cold boot and
-  # per-request time-to-first-byte; the 3000 ms budget is reported, not enforced.
+  # buried behind the 7-minute Playwright capture. Boots the prompt-builder
+  # worker (the route's production path), prints cold boot and per-request
+  # time-to-first-byte, samples a health endpoint while each build is in
+  # flight, and FAILS the job above the 3000 ms warm budget.
   native-latency:
     name: Measure latency and chat isolation
     runs-on: ubuntu-latest
