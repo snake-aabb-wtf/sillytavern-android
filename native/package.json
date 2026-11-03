@@ -8,8 +8,10 @@
     "capture:reference": "node test/capture-reference.mjs",
     "test:headless": "node test/build-headless.mjs"
   },
+  "dependencies": {
+    "jsdom": "26.1.0"
+  },
   "devDependencies": {
-    "jsdom": "26.1.0",
     "playwright": "1.64.1"
   }
 }

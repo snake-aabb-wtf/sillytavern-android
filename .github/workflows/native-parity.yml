@@ -64,3 +64,65 @@ jobs:
             fixtures/headless
           if-no-files-found: error
           retention-days: 14
+
+  # R5 probe in its own job so it starts immediately and its logs are not
+  # buried behind the 7-minute Playwright capture. Prints cold boot and
+  # per-request time-to-first-byte; the 3000 ms budget is reported, not enforced.
+  native-latency:
+    name: Measure /api/native/chat latency
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install SillyTavern dependencies
+        working-directory: SillyTavern
+        run: npm ci --no-audit --no-fund
+
+      - name: Install native harness dependencies
+        working-directory: native
+        run: npm ci --no-audit --no-fund
+
+      - name: Measure /api/native/chat latency
+        working-directory: native
+        run: node test/latency-native-chat.mjs
+
+  # Proves the shipped artifact, not just the sources: stage-runtime.sh applies
+  # the native/ overlay to dist/runtime/server and appends the mount to the
+  # staged src/server-main.js. The check boots that copy and expects the route
+  # to answer 400 (empty body) ahead of the terminal 404 middleware.
+  native-endpoint:
+    name: Stage runtime and verify /api/native mount
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Stage the runtime with the native overlay
+        run: bash scripts/stage-runtime.sh
+
+      - name: Verify /api/native answers on the staged copy
+        run: bash scripts/verify-native-endpoint.sh dist/runtime
+
+      - name: Upload staging boot log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-endpoint-stage-log
+          path: |
+            dist/stage-boot.log
+            dist/native-endpoint.log
+          if-no-files-found: ignore
+          retention-days: 14

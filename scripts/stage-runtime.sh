@@ -112,6 +112,38 @@ tar -C "$ST_DIR" \
 printf '==> Installing dependencies (dev included: webpack needs them)\n'
 (cd "$SERVER_DIR" && npm ci --include=dev --no-audit --no-fund)
 
+# The native client's API route lives in native/ and is mounted by appending to
+# the staged server-main.js copy (SillyTavern/ itself is never modified). The
+# route's prompt builder is a runtime dependency here, so install only its
+# production tree (jsdom); the parity tests' Playwright stays out of the APK.
+printf '==> Overlaying native API endpoints\n'
+mkdir -p "$SERVER_DIR/native"
+tar -C "$ROOT/native" \
+    --exclude='./node_modules' \
+    --exclude='./test' \
+    -cf - . | tar -C "$SERVER_DIR/native" -xf -
+(cd "$SERVER_DIR/native" && npm ci --omit=dev --no-audit --no-fund)
+[[ -f "$SERVER_DIR/native/endpoints/native-chat.mjs" ]] || die "native-chat.mjs was not overlaid"
+[[ -d "$SERVER_DIR/native/node_modules/jsdom" ]] || die "jsdom was not installed for the native builder"
+
+STAGED_MAIN="$SERVER_DIR/src/server-main.js"
+[[ -f "$STAGED_MAIN" ]] || die "staged server-main.js not found at $STAGED_MAIN"
+grep -q "'/api/native'" "$STAGED_MAIN" && die "server-main.js already mounts /api/native"
+# The placeholder is registered synchronously while this module evaluates, so
+# it lands ahead of the terminal 404 middleware that the async init chain
+# registers later. The dynamic import then fills in the real router.
+cat >> "$STAGED_MAIN" <<'EOF'
+
+// ST-ANDROID: native client API. Registered before the async startup chain can
+// install its terminal 404 handler; the router itself loads asynchronously.
+let nativeRouter = null;
+app.use('/api/native', (req, res, next) => (nativeRouter ? nativeRouter(req, res, next) : next()));
+const { default: loadedNativeRouter } = await import('../native/endpoints/native-chat.mjs');
+nativeRouter = loadedNativeRouter;
+console.info('[native] /api/native mounted'); // ST-ANDROID
+EOF
+printf '==> Mounted /api/native in %s\n' "$STAGED_MAIN"
+
 TMP_DATA="$(mktemp -d "${TMPDIR:-/tmp}/st-stage-data.XXXXXX")"
 PORT="$(free_port)"
 [[ "$PORT" =~ ^[0-9]+$ ]] || die "failed to pick a free port"
@@ -121,7 +153,7 @@ printf '    data root: %s\n' "$TMP_DATA"
 printf '    boot log:  %s\n' "$BOOT_LOG"
 (
     cd "$SERVER_DIR"
-    exec env ST_SKIP_WEBPACK=0 NODE_ENV=production \
+    exec env ST_SKIP_WEBPACK=0 NODE_ENV=production NATIVE_CHAT_WARMUP=0 \
         "$NODE_BIN" server.js --port "$PORT" --dataRoot "$TMP_DATA"
 ) >"$BOOT_LOG" 2>&1 &
 SERVER_PID=$!
