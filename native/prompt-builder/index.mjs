@@ -263,8 +263,21 @@ export async function createBuilder({ dataDir, port, serverDir = DEFAULT_SERVER_
             throw new Error(`Character not found: ${avatarUrl} (have: ${characters.map(c => c.avatar).join(', ')})`);
         }
 
+        const alreadySelected = String(ctx().characterId) === String(index);
         characters[index].chat = fileName;
         await ctx().selectCharacterById(index, { switchMenu: false });
+
+        // selectCharacterById only re-reads the chat when the selected character
+        // changes (script.js:889-908). This builder is memoised for the whole
+        // server lifetime, so without an explicit reload turn 2 would reuse the
+        // restored in-memory array and silently drop anything persisted between
+        // turns (a real assistant reply saved by the caller).
+        if (alreadySelected) {
+            const reload = ctx().reloadCurrentChat;
+            if (typeof reload !== 'function') throw new Error('reloadCurrentChat is not available; cannot reload the chat for this turn');
+            await reload();
+        }
+
         await host.waitFor(() => Array.isArray(ctx().chat) && ctx().chat.length >= 2, {
             timeoutMs: 60_000,
             label: 'fixture chat to load',

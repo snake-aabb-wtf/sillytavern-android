@@ -208,6 +208,57 @@ test('emits a terminal error frame when the upstream fails mid-stream', async ()
     }
 });
 
+test('separates the terminal error frame from a partial upstream line', async () => {
+    // A generator can throw after emitting an arbitrary byte slice. If that
+    // slice does not end at an SSE event boundary, the error frame must not be
+    // glued onto the partial `data:` line.
+    const partial = 'data: {"choices":[{"delta":{"content":"Are "}}]}';
+    const app = await listen(createNativeChatRouter({
+        builder: fakeBuilder([]),
+        forward: async () => ({
+            status: 200,
+            headers: { 'content-type': 'text/event-stream' },
+            body: (async function* stream() {
+                yield Buffer.from(partial);
+                throw new Error('socket exploded mid-line');
+            })(),
+        }),
+    }));
+
+    try {
+        const response = await fetch(app.url, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ avatar_url: AVATAR, file_name: CHAT, user_input: INPUT, type: 'send' }),
+        });
+
+        assert.equal(response.status, 200);
+        let body;
+        try {
+            body = await response.text();
+        } catch (error) {
+            // A transport error is an acceptable failure signal too.
+            assert.ok(error, 'transport error observed');
+            return;
+        }
+
+        assert.match(body, /^event: error$/m, 'missing terminal SSE error event');
+        assert.match(body, /socket exploded mid-line/);
+        assert.equal(body.includes('[DONE]'), false, 'a failed stream must not look completed');
+
+        // The error frame must start a fresh event, not extend the partial one.
+        assert.equal(body.includes('Are event: error'), false, 'error frame glued onto a partial data line');
+        const events = body.split('\n\n').filter(event => event.trim() !== '');
+        const errorEvent = events.find(event => event.startsWith('event: error'));
+        assert.ok(errorEvent, 'error frame is not a standalone SSE event');
+        const dataLine = errorEvent.split('\n').find(line => line.startsWith('data: '));
+        assert.ok(dataLine, 'error event has no data line');
+        assert.doesNotThrow(() => JSON.parse(dataLine.slice('data: '.length)), 'error data is not valid JSON');
+    } finally {
+        await app.close();
+    }
+});
+
 test('aborts the upstream when the client disconnects', async () => {
     let aborted = false;
     const app = await listen(createNativeChatRouter({

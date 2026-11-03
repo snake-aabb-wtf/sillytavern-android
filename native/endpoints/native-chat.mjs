@@ -121,6 +121,30 @@ async function collectBody(body, limit = MAX_ERROR_BODY_BYTES) {
     return Buffer.concat(chunks);
 }
 
+/**
+ * Keeps the last few bytes already written to the client, so a terminal frame
+ * can be separated from a partial upstream line (SSE chunks are arbitrary byte
+ * boundaries, not event boundaries).
+ */
+function tailOf(previous, chunk) {
+    const combined = previous + chunk.toString('utf8');
+    return combined.length > 4 ? combined.slice(-4) : combined;
+}
+
+/**
+ * Builds the terminal `event: error` frame, prefixing exactly enough newlines
+ * to land on a fresh event boundary. Without this a mid-line upstream failure
+ * corrupts the very line it is meant to report.
+ */
+function errorFrame({ wroteBytes, tail, message }) {
+    const payload = JSON.stringify({ error: message });
+    const frame = `event: error\ndata: ${payload}\n\n`;
+    if (!wroteBytes) return frame;
+    if (tail.endsWith('\n\n')) return frame;
+    if (tail.endsWith('\n')) return `\n${frame}`;
+    return `\n\n${frame}`;
+}
+
 /* ------------------------------------------------------------------ */
 /* Router                                                              */
 /* ------------------------------------------------------------------ */
@@ -265,6 +289,11 @@ export function createNativeChatRouter({ builder, forward, log = console.info })
 
         let firstChunkAt = null;
         let streamFailure = null;
+        // Track what the client has actually received so a terminal frame can
+        // never be glued onto a partial `data:` line. Upstream chunks are
+        // arbitrary byte boundaries, not event boundaries.
+        let wroteBytes = false;
+        let tail = '';
         try {
             for await (const chunk of iterateBody(upstream.body)) {
                 if (controller.signal.aborted) break;
@@ -272,6 +301,8 @@ export function createNativeChatRouter({ builder, forward, log = console.info })
                     firstChunkAt = Date.now();
                     log(`[native] chat first byte in ${firstChunkAt - startedAt}ms (build ${builtAt - startedAt}ms)`);
                 }
+                wroteBytes = true;
+                tail = tailOf(tail, Buffer.from(chunk));
                 if (!res.write(chunk)) {
                     // Respect backpressure; also wake up if the client leaves.
                     await new Promise(resolve => {
@@ -294,7 +325,7 @@ export function createNativeChatRouter({ builder, forward, log = console.info })
                 // like a completed reply.
                 if (!res.writableEnded) {
                     try {
-                        res.write(`event: error\ndata: ${JSON.stringify({ error: `upstream stream failed: ${streamFailure}` })}\n\n`);
+                        res.write(errorFrame({ wroteBytes, tail, message: `upstream stream failed: ${streamFailure}` }));
                     } catch {
                         // Client already gone.
                     }
