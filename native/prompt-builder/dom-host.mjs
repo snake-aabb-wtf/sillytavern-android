@@ -315,6 +315,7 @@ function installFetch(window, baseUrl, jar, intercept, log) {
         if (cookie && !headers.has('cookie')) headers.set('cookie', cookie);
         options.headers = headers;
 
+        const method = options.method ?? 'GET';
         let response;
         try {
             response = await nodeFetch(url, options);
@@ -327,6 +328,7 @@ function installFetch(window, baseUrl, jar, intercept, log) {
             log(`[host] retrying ${url} after ${code}`);
             response = await nodeFetch(url, options);
         }
+        log(`[host] fetch ${method} ${url} -> ${response.status}`);
         let setCookies = [];
         try {
             setCookies = typeof response.headers.getSetCookie === 'function'
@@ -497,15 +499,35 @@ export async function createDomHost({
         logs,
     });
 
+    // Progress heartbeat: when initialisation stalls, show what the client
+    // has and has not reached yet.
+    const heartbeat = setInterval(() => {
+        try {
+            const st = window.SillyTavern ?? globalThis.SillyTavern;
+            const context = st?.getContext?.();
+            log(`[wait] ctx=${Boolean(context)} settingsReady=${app?.settingsReady} ` +
+                `chars=${context?.characters?.length ?? '-'} ` +
+                `source=${context?.chatCompletionSettings?.chat_completion_source ?? '-'} ` +
+                `online=${context?.onlineStatus ?? '-'}`);
+        } catch (error) {
+            log(`[wait] heartbeat failed: ${error?.message || error}`);
+        }
+    }, 15_000);
+    heartbeat.unref?.();
+
     // Same readiness signal the Playwright capture waits on.
-    await waitFor(() => {
-        const st = window.SillyTavern ?? globalThis.SillyTavern;
-        if (!st?.getContext) return false;
-        const ctx = st.getContext();
-        return Array.isArray(ctx.characters)
-            && ctx.characters.length > 0
-            && ctx.chatCompletionSettings?.chat_completion_source === 'openai';
-    }, { label: 'window.SillyTavern context (characters + openai settings)' });
+    try {
+        await waitFor(() => {
+            const st = window.SillyTavern ?? globalThis.SillyTavern;
+            if (!st?.getContext) return false;
+            const ctx = st.getContext();
+            return Array.isArray(ctx.characters)
+                && ctx.characters.length > 0
+                && ctx.chatCompletionSettings?.chat_completion_source === 'openai';
+        }, { label: 'window.SillyTavern context (characters + openai settings)' });
+    } finally {
+        clearInterval(heartbeat);
+    }
     log('[host] application ready');
 
     return {

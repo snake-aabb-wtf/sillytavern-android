@@ -114,7 +114,7 @@ function runBuilder(specPath) {
                 resolve({ stdout, stderr });
                 return;
             }
-            reject(new Error(`Headless builder exited with ${code}\n--- stdout ---\n${stdout.slice(-3000)}\n--- stderr ---\n${stderr.slice(-8000)}`));
+            reject(new Error(`Headless builder exited with ${code}\n--- stdout ---\n${stdout.slice(-3000)}\n--- stderr ---\n${stderr.slice(-20000)}`));
         });
     });
 }
@@ -143,6 +143,7 @@ async function buildCase(caseSpec) {
         const { stdout, stderr } = await runBuilder(specPath);
         const elapsedMs = Date.now() - startedAt;
         if (stdout.trim()) process.stdout.write(`  ${stdout.trim()}\n`);
+        fs.writeFileSync(out.replace(/\.json$/, '.log'), `--- stdout ---\n${stdout}\n--- stderr ---\n${stderr}\n`);
         if (stderr.trim() && process.env.HEADLESS_VERBOSE === '1') process.stderr.write(stderr);
         return { out, elapsedMs };
     } finally {
