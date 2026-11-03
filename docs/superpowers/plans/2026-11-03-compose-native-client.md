@@ -219,7 +219,7 @@ git commit -m "perf: cut warm prompt-build latency to the interactive budget"
 
 - [ ] **Step 2: 空壳宿主**
 
-`MainActivity.onCreate` 在 `ServerState.Ready` 后 `setContent { SolTheme { SolApp(port) } }`；`SolApp` 先只显示 `Text("RikkaHub? no — Sol")`（临时占位，Task 7 替换）。保留启动页与失败页逻辑，删除 `WebView` 初始化与 `WebBridge` 调用。
+`MainActivity.onCreate` 在 `ServerState.Ready` 后 `setContent { SolTheme { SolApp(port) } }`；`SolApp` 先只显示 `Text("SillyTavern Sol")`（临时占位，Task 7 替换）。保留启动页与失败页逻辑，删除 `WebView` 初始化与 `WebBridge` 调用。
 
 - [ ] **Step 3: CI 编译**
 
