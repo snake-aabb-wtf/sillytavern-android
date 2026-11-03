@@ -34,16 +34,24 @@ const DEFAULT_SERVER_DIR = path.resolve(HERE, '../../SillyTavern');
 export const GENERATE_PATH = '/api/backends/chat-completions/generate';
 export const STATUS_PATH = '/api/backends/chat-completions/status';
 
-// A minimal OpenAI-style SSE body: one content chunk and the terminator. The
-// request body is what matters here; the client only has to stop streaming.
-export const SSE_BODY = 'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n';
+// The stub answer the client receives after it has POSTed /generate. The
+// request body is captured before this response is consumed, so its content
+// cannot change what the model receives. An error status is deliberate: the
+// success path appends the stub to the transcript, saves the chat and triggers
+// a PromptManager dry-run re-render (measured at 1-4 s per turn), while the
+// error path just unblocks generation. build() swallows the rejection it
+// causes; page-originated chat saves are blocked, so nothing is persisted.
+export const STUB_FAILURE_BODY = JSON.stringify({ error: { message: 'native prompt capture stub' } });
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 /**
  * Canonical form for comparing chat metadata. Key order is irrelevant, and the
- * per-session `integrity` uuid is excluded: it is generated client-side when a
- * file has none and says nothing about whether the chat changed.
+ * volatile bookkeeping fields are excluded: `integrity` is a per-session uuid
+ * generated client-side when a file has none, `tainted` is set by every
+ * generated message, and `timedWorldInfo` / `lastInContextMessageId` /
+ * `pick_reroll_seed` / `chat_id_hash` are runtime state the client rebuilds
+ * itself. None of them says anything about whether the chat file changed.
  */
 function canonicalManifest(value) {
     if (Array.isArray(value)) return value.map(canonicalManifest);
@@ -53,13 +61,17 @@ function canonicalManifest(value) {
     return value;
 }
 
+function normalizeManifest(metadata) {
+    const copy = { ...(metadata && typeof metadata === 'object' ? metadata : {}) };
+    for (const key of ['integrity', 'tainted', 'timedWorldInfo', 'lastInContextMessageId', 'pick_reroll_seed', 'chat_id_hash']) {
+        delete copy[key];
+    }
+    return copy;
+}
+
 function sameManifest(left, right) {
-    const strip = metadata => {
-        const copy = { ...(metadata && typeof metadata === 'object' ? metadata : {}) };
-        delete copy.integrity;
-        return copy;
-    };
-    return JSON.stringify(canonicalManifest(strip(left))) === JSON.stringify(canonicalManifest(strip(right)));
+    return JSON.stringify(canonicalManifest(normalizeManifest(left)))
+        === JSON.stringify(canonicalManifest(normalizeManifest(right)));
 }
 
 async function getFreePort() {
@@ -176,9 +188,13 @@ export async function createBuilder({ dataDir, port, serverDir = DEFAULT_SERVER_
     // answer - so every page-originated chat save is answered locally. The
     // caller's own saves go through its own HTTP client, not this wrapper.
 
-    // Chat identity of the state currently loaded into the client. Used to skip
-    // CHAT_CHANGED/CHAT_LOADED work when a turn reloads the same unchanged chat.
+    // Chat identity and file-side metadata of the state currently loaded into
+    // the client. Used to skip CHAT_CHANGED/CHAT_LOADED work when a turn
+    // reloads the same unchanged chat: the comparison is between what the file
+    // said last time and what it says now, so runtime-only fields the client
+    // keeps in memory cannot cause a spurious chat-switch notification.
     let lastChatKey = null;
+    let lastChatManifest = null;
 
     try {
         await waitForServer(child, baseUrl);
@@ -211,9 +227,9 @@ export async function createBuilder({ dataDir, port, serverDir = DEFAULT_SERVER_
                     } else {
                         captured = record;
                     }
-                    return new Response(SSE_BODY, {
-                        status: 200,
-                        headers: { 'content-type': 'text/event-stream' },
+                    return new Response(STUB_FAILURE_BODY, {
+                        status: 500,
+                        headers: { 'content-type': 'application/json' },
                     });
                 }
                 if (url.includes(STATUS_PATH)) {
@@ -303,7 +319,9 @@ export async function createBuilder({ dataDir, port, serverDir = DEFAULT_SERVER_
         // only need to run when the chat or its metadata actually changed: the
         // real UI does not reload at all between two turns of one chat, so
         // re-notifying would apply work that belongs to a chat switch.
-        const notify = key !== lastChatKey || !sameManifest(metadata, nextMetadata);
+        const nextManifest = normalizeManifest(nextMetadata);
+        const keyChanged = key !== lastChatKey;
+        const notify = keyChanged || (lastChatManifest !== null && !sameManifest(lastChatManifest, nextManifest));
         const previousIntegrity = metadata?.integrity;
 
         const liveChat = context.chat;
@@ -317,6 +335,9 @@ export async function createBuilder({ dataDir, port, serverDir = DEFAULT_SERVER_
             if (!metadata.integrity && typeof context.uuidv4 === 'function') metadata.integrity = context.uuidv4();
         }
         if (notify) {
+            log(`[builder] chat notify: keyChanged=${keyChanged} ` +
+                `from=${JSON.stringify(canonicalManifest(lastChatManifest))} ` +
+                `to=${JSON.stringify(canonicalManifest(nextManifest))}`);
             // clearChat() resets extension prompts on a real reload; extensions
             // re-add theirs from CHAT_CHANGED/CHAT_LOADED below.
             const extensionPrompts = context.extensionPrompts;
@@ -331,6 +352,7 @@ export async function createBuilder({ dataDir, port, serverDir = DEFAULT_SERVER_
             await context.eventSource.emit(context.eventTypes.CHAT_LOADED, { detail: { id: index, character } });
         }
         lastChatKey = key;
+        lastChatManifest = nextManifest;
         const eventsAt = performance.now();
         log(`[builder] chat load (ms): fetch=${Math.round(fetchedAt - startedAt)} ` +
             `apply=${Math.round(appliedAt - fetchedAt)} events=${Math.round(eventsAt - appliedAt)} ` +
@@ -402,6 +424,7 @@ export async function createBuilder({ dataDir, port, serverDir = DEFAULT_SERVER_
                 if (typeof reload !== 'function') throw new Error('reloadCurrentChat is not available; cannot reload the chat for this turn');
                 await reload();
                 lastChatKey = `${index}:${fileName}`;
+                lastChatManifest = normalizeManifest(ctx().chatMetadata);
             }
             mark('chat');
         } else {
@@ -410,6 +433,7 @@ export async function createBuilder({ dataDir, port, serverDir = DEFAULT_SERVER_
             // turn only; later turns take the branch above).
             await ctx().selectCharacterById(index, { switchMenu: false });
             lastChatKey = `${index}:${fileName}`;
+            lastChatManifest = normalizeManifest(ctx().chatMetadata);
             mark('select');
             mark('chat');
         }
@@ -455,8 +479,20 @@ export async function createBuilder({ dataDir, port, serverDir = DEFAULT_SERVER_
 
         let record;
         try {
-            log(`[builder] clicking send (generating=${host.app?.isGenerating?.()})`);
-            sendButton.click();
+            log(`[builder] triggering send (generating=${host.app?.isGenerating?.()})`);
+            // Call the exported send path directly instead of clicking: the
+            // click handler only wraps it in a mutex and leaves its promise
+            // unattached, which would turn the stub's intentional rejection
+            // into an unhandled rejection in the host process.
+            const sendTextareaMessage = host.app?.sendTextareaMessage;
+            if (typeof sendTextareaMessage === 'function') {
+                const generation = sendTextareaMessage();
+                if (typeof generation?.catch === 'function') {
+                    generation.catch(error => log(`[builder] stub generation rejected (expected): ${error?.message || error}`));
+                }
+            } else {
+                sendButton.click();
+            }
             mark('click');
 
             const timeout = delay(timeoutMs).then(() => {
@@ -466,9 +502,9 @@ export async function createBuilder({ dataDir, port, serverDir = DEFAULT_SERVER_
             record = captured ?? await Promise.race([capturedPromise, timeout]);
             mark('capture');
 
-            // The fetch intercept resolves before the client consumes the
-            // stub. Wait for the generation flag to drop so the late append and
-            // blocked save have both happened before the rollback.
+            // The fetch intercept resolves before the client reacts to the
+            // stub. Wait until it leaves the generating state, so no client
+            // work can touch the chat/metadata after the rollback below.
             if (typeof host.app?.isGenerating === 'function') {
                 try {
                     await host.waitFor(() => !host.app.isGenerating(), {
