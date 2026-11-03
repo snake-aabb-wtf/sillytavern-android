@@ -62,7 +62,8 @@ jobs:
           cd "$RUNNER_TEMP/src/nodejs-mobile"
           grep -n 'with-intl=none' android_configure.py
           sed -i 's/--with-intl=none/--with-intl=small-icu/' android_configure.py
-          test "$(grep -c -- '--with-intl=small-icu' android_configure.py)" = "1"
+          # The comment above the os.system call also names the flag, so expect 2.
+          test "$(grep -c -- '--with-intl=small-icu' android_configure.py)" = "2"
           ! grep -q -- '--with-intl=none' android_configure.py
           grep -n 'with-intl' android_configure.py
           test -d deps/icu-small/source/data/in
@@ -107,8 +108,9 @@ jobs:
           SIZE=$(stat -c %s "$SO")
           echo "libnode.so size: $SIZE bytes ($(du -h "$SO" | cut -f1))"
           test "$SIZE" -gt 41943040
-          grep -q '"v8_enable_i18n_support": 1' out/Release/config.gypi
-          grep -q '"icu_small": 1' out/Release/config.gypi || true
+          grep -qE "['\"]v8_enable_i18n_support['\"]: 1" out/Release/config.gypi
+          grep -qE "['\"]icu_small['\"]: ['\"]?true" out/Release/config.gypi
+          grep -n 'i18n\|icu_small' out/Release/config.gypi
           # `strings | grep -q` can die of SIGPIPE under pipefail, so materialize it.
           strings -a "$SO" > "$RUNNER_TEMP/libnode.strings"
           grep -c 'icudt' "$RUNNER_TEMP/libnode.strings"
@@ -129,6 +131,17 @@ jobs:
             ${{ runner.temp }}/build.log
           if-no-files-found: error
           retention-days: 30
+
+      # Kept even when a build/verify step fails, so the failure is diagnosable
+      # without fetching API logs.
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: libnode-build-log
+          path: ${{ runner.temp }}/build.log
+          if-no-files-found: ignore
+          retention-days: 14
 
       # Published as a stable asset URL so android.yml can fetch it by tag.
       - name: Publish Release asset
