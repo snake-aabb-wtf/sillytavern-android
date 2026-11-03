@@ -11,7 +11,7 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.longOrNull
+import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.put
 
 /**
@@ -23,7 +23,10 @@ import kotlinx.serialization.json.put
  *    `[{file_name, file_id, mes, last_mes, ...}]`, or `{error:true}` when the
  *    character has no chats directory.
  *  - `POST /api/chats/get` `{avatar_url, file_name}` → the parsed JSONL lines as
- *    an array whose first element is the chat header; `{}` when the file is missing.
+ *    an array whose first element is the chat header. `[]` means the file does not
+ *    exist yet (a new chat); `{}` means the request could not be read (missing
+ *    `file_name` or a handler exception) and is surfaced as [ChatFormatException],
+ *    never as an empty chat.
  *  - `POST /api/chats/save` `{avatar_url, file_name, chat: [...]}` → `{ok:true}`.
  *    The server writes `chat.map(JSON.stringify).join('\n')`, so whatever is posted
  *    is what lands on disk.
@@ -60,7 +63,11 @@ class ChatRepository(private val engine: EngineClient) {
      * Loads both halves of a chat file.
      *
      * The header is the first array element (`script.js` does `data.shift()` before
-     * rendering), and it must be sent back first on save.
+     * rendering), and it must be sent back first on save. An empty array is a chat
+     * that does not exist yet: [Chat.metadata] is then empty and the caller builds a
+     * fresh header. Anything that cannot be represented without losing data throws
+     * [ChatFormatException] rather than being dropped, because a save after a lossy
+     * load rewrites the file on disk without it.
      */
     suspend fun loadChat(avatar: String, file: String): Chat {
         val payload = engine.postJson(
@@ -70,11 +77,32 @@ class ChatRepository(private val engine: EngineClient) {
                 put("file_name", chatName(file))
             },
         )
-        // chats.js answers {} when file_name is missing or the file cannot be read.
-        val lines = payload as? JsonArray ?: return EMPTY_CHAT
-        val metadata = lines.firstOrNull() as? JsonObject ?: JsonObject(emptyMap())
-        val messages = lines.drop(1).mapNotNull { (it as? JsonObject)?.let(::ChatMessage) }
-        return Chat(metadata, messages)
+        // chats.js answers [] only when the file does not exist; {} is returned for a
+        // missing file_name or any handler exception. Treating {} as empty would make
+        // a read failure indistinguishable from a new chat, and save would overwrite
+        // the real chat with a synthetic header.
+        val lines = payload as? JsonArray
+            ?: throw ChatFormatException("$PATH_GET returned $payload instead of a chat array")
+        if (lines.isEmpty()) return Chat(JsonObject(emptyMap()), emptyList())
+
+        val header = lines.first() as? JsonObject
+            ?: throw ChatFormatException("chat header is not an object: ${lines.first()}")
+        if (header.containsKey("mes") || header.containsKey("is_user")) {
+            // getChatData filters falsy lines only, so an unparseable header simply
+            // disappears and the first message becomes element 0. Promoting it to
+            // metadata would overwrite user_name/character_name/create_date and the
+            // integrity slug on the next save, bypassing the server's corrupt-chat guard.
+            throw ChatFormatException("chat header is missing; the first line is a message")
+        }
+
+        val messages = lines.drop(1).mapIndexed { index, element ->
+            val message = element as? JsonObject
+                ?: throw ChatFormatException(
+                    "chat line ${index + 2} is not an object: $element",
+                )
+            ChatMessage(message)
+        }
+        return Chat(header, messages)
     }
 
     /**
@@ -122,7 +150,11 @@ class ChatRepository(private val engine: EngineClient) {
 
     private fun epochMillis(element: JsonElement?): Long {
         val primitive = element as? JsonPrimitive ?: return 0L
-        if (!primitive.isString) return primitive.longOrNull ?: 0L
+        if (!primitive.isString) {
+            // getChatInfo seeds last_mes with stats.mtimeMs, a fractional value
+            // (chats.js:420), so an integral parse would turn every empty chat into 0.
+            return primitive.doubleOrNull?.toLong() ?: 0L
+        }
         return runCatching { Instant.parse(primitive.content).toEpochMilli() }.getOrDefault(0L)
     }
 
@@ -134,6 +166,15 @@ class ChatRepository(private val engine: EngineClient) {
         const val PATH_GET = "/api/chats/get"
         const val PATH_SAVE = "/api/chats/save"
         const val CHAT_EXTENSION = ".jsonl"
-        val EMPTY_CHAT = Chat(JsonObject(emptyMap()), emptyList())
     }
 }
+
+/**
+ * A chat file whose JSONL structure cannot be represented without losing data, or
+ * a `/api/chats/get` response that is not a chat array.
+ *
+ * Load must fail loudly here: `save` rewrites the whole file from what it was given,
+ * so a silently repaired or partially loaded chat would permanently delete the parts
+ * that were not understood.
+ */
+class ChatFormatException(message: String) : Exception(message)

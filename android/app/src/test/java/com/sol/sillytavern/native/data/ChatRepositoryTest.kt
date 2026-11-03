@@ -16,6 +16,7 @@ import okhttp3.mockwebserver.RecordedRequest
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -153,7 +154,7 @@ class ChatRepositoryTest {
                 "file_size": "12 B",
                 "chat_items": 0,
                 "mes": "[The chat is empty]",
-                "last_mes": 1714561200000
+                "last_mes": 1714561200000.456
               }
             ]
         """.trimIndent()
@@ -199,19 +200,94 @@ class ChatRepositoryTest {
     }
 
     @Test
-    fun loadTreatsAnObjectResponseAsAnEmptyChat() = runBlocking {
+    fun loadTreatsAnEmptyArrayAsANewChat() = runBlocking {
         server.dispatcher = object : Dispatcher() {
             override fun dispatch(request: RecordedRequest): MockResponse = when (request.path) {
                 "/csrf-token" -> jsonResponse("""{"token":"tok"}""")
-                // chats.js answers {} for a missing file_name or an unreadable file.
+                // getChatData returns [] when the chat file does not exist yet, which
+                // is the one response that really means "new chat".
+                else -> jsonResponse("[]")
+            }
+        }
+
+        val chat = repo.loadChat(AVATAR, "new.jsonl")
+
+        assertTrue(chat.messages.isEmpty())
+        assertTrue(chat.metadata.isEmpty())
+    }
+
+    @Test
+    fun loadRejectsAnObjectResponseSoAReadFailureIsNotANewChat() {
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = when (request.path) {
+                "/csrf-token" -> jsonResponse("""{"token":"tok"}""")
+                // chats.js:592-618 answers {} for a missing file_name or for any
+                // handler exception — never for a chat that simply does not exist.
                 else -> jsonResponse("{}")
             }
         }
 
-        val chat = repo.loadChat(AVATAR, "missing.jsonl")
+        assertThrows(ChatFormatException::class.java) {
+            runBlocking { repo.loadChat(AVATAR, "unreadable.jsonl") }
+        }
+    }
 
-        assertTrue(chat.messages.isEmpty())
-        assertTrue(chat.metadata.isEmpty())
+    @Test
+    fun loadFailsWhenALineAfterTheHeaderIsNotAnObject() {
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = when (request.path) {
+                "/csrf-token" -> jsonResponse("""{"token":"tok"}""")
+                // getChatData only filters falsy lines (chats.js:584), so this truthy
+                // string reaches the client. Dropping it would delete it on save.
+                "/api/chats/get" -> jsonResponse(
+                    """
+                    [
+                      {"user_name": "User", "character_name": "Seraphina", "chat_metadata": {}},
+                      {"name": "Seraphina", "mes": "one", "is_user": false},
+                      "plain string",
+                      {"name": "User", "mes": "two", "is_user": true}
+                    ]
+                    """.trimIndent(),
+                )
+
+                else -> MockResponse().setResponseCode(404)
+            }
+        }
+
+        val error = assertThrows(ChatFormatException::class.java) {
+            runBlocking { repo.loadChat(AVATAR, "chat.jsonl") }
+        }
+        assertTrue(
+            "line number must point at the bad line: ${error.message}",
+            error.message!!.contains("line 3"),
+        )
+    }
+
+    @Test
+    fun loadFailsWhenTheHeaderIsMissingAndTheFirstLineIsAMessage() {
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = when (request.path) {
+                "/csrf-token" -> jsonResponse("""{"token":"tok"}""")
+                // A BOM or a truncated write makes the real header disappear; the
+                // first message is then element 0 and must not become metadata.
+                else -> jsonResponse(
+                    """
+                    [
+                      {"name": "Seraphina", "mes": "one", "is_user": false},
+                      {"name": "User", "mes": "two", "is_user": true}
+                    ]
+                    """.trimIndent(),
+                )
+            }
+        }
+
+        val error = assertThrows(ChatFormatException::class.java) {
+            runBlocking { repo.loadChat(AVATAR, "headerless.jsonl") }
+        }
+        assertTrue(
+            "must report the missing header: ${error.message}",
+            error.message!!.contains("header"),
+        )
     }
 
     @Test

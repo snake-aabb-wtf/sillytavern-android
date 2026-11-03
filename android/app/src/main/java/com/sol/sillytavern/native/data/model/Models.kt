@@ -30,8 +30,8 @@ data class Character(
  * the server appends it again.
  *
  * [updatedAt] is epoch milliseconds. `last_mes` is an ISO timestamp for a chat with
- * messages and the file's mtime in milliseconds for an empty one; an unparseable
- * value becomes 0 so a broken file sorts last instead of failing the list.
+ * messages and the file's fractional mtime in milliseconds for an empty one; an
+ * unparseable value becomes 0 so a broken file sorts last instead of failing the list.
  */
 data class ChatSummary(
     val file: String,
