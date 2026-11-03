@@ -58,6 +58,23 @@ class SettingsHttpException(val code: Int, val detail: String) :
     Exception(if (detail.isBlank()) "HTTP $code" else "HTTP $code: $detail")
 
 /**
+ * `/api/settings/save` answered 2xx but did not report success.
+ *
+ * The handler catches write errors and calls `response.send(err)` without a
+ * status (`settings.js:206-215`); an `Error` serialises to `{}`, so a failed
+ * write looks like a 200 with an empty object. Only `{ result: "ok" }`
+ * (settings.js:211) may be reported as saved.
+ */
+class SettingsSaveException(message: String) : Exception(message)
+
+/** The seam the view model uses; the repository is the HTTP implementation. */
+interface SettingsStore {
+    suspend fun load(): ProviderConfig
+
+    suspend fun save(config: ProviderConfig, apiKey: String?)
+}
+
+/**
  * Reads and writes the provider block of `settings.json` through the bundled server.
  *
  * Wire contract, verified in the server source:
@@ -80,12 +97,12 @@ class SettingsHttpException(val code: Int, val detail: String) :
  * `oai_settings.openai_model` for OpenAI. `reverse_proxy` is the proxy for the
  * *official* providers (`openai.js:2739-2749`) and is deliberately untouched.
  */
-class SettingsRepository(private val engine: EngineClient) {
+class SettingsRepository(private val engine: EngineClient) : SettingsStore {
 
     private val json = Json { ignoreUnknownKeys = true }
 
     /** Loads the provider block; throws [SettingsFormatException] on an unreadable file. */
-    suspend fun load(): ProviderConfig = configOf(readRoot())
+    override suspend fun load(): ProviderConfig = configOf(readRoot())
 
     /**
      * Patches the selected provider and saves the whole document.
@@ -94,7 +111,7 @@ class SettingsRepository(private val engine: EngineClient) {
      * settings write cannot leave a new key active against a provider that was
      * never selected. A blank key leaves the stored secret untouched.
      */
-    suspend fun save(config: ProviderConfig, apiKey: String?) {
+    override suspend fun save(config: ProviderConfig, apiKey: String?) {
         // Read and parse before any write: a broken file must abort the whole
         // operation, not be silently replaced by a partial object.
         val root = readRoot()
@@ -111,7 +128,16 @@ class SettingsRepository(private val engine: EngineClient) {
                 },
             )
         }
-        post(PATH_SAVE, patched)
+        val response = post(PATH_SAVE, patched)
+        val result = (response as? JsonObject)
+            ?.get("result")
+            ?.let { it as? JsonPrimitive }
+            ?.contentOrNull
+        if (result != "ok") {
+            throw SettingsSaveException(
+                "保存未确认：服务器返回 HTTP 200 但没有 { result: \"ok\" }（$response）",
+            )
+        }
     }
 
     /**
@@ -156,12 +182,23 @@ class SettingsRepository(private val engine: EngineClient) {
     }
 
     private fun configOf(root: JsonObject): ProviderConfig {
-        val oai = root["oai_settings"] as? JsonObject ?: JsonObject(emptyMap())
+        val rawOai = root["oai_settings"]
+        if (rawOai != null && rawOai !is JsonObject) {
+            throw SettingsFormatException(
+                "settings.json oai_settings is not an object; refusing to interpret it",
+            )
+        }
+        val oai = rawOai as? JsonObject ?: JsonObject(emptyMap())
         return ProviderConfig(
             provider = ChatProvider.fromSource(oai.string("chat_completion_source")),
             baseUrl = oai.string("custom_url"),
             customModel = oai.string("custom_model"),
-            openRouterModel = oai.string("openrouter_model"),
+            // "OR_Website" is the client's sentinel for "no OpenRouter model"
+            // (openai.js:1734-1735 returns null for it). Showing it in the form
+            // and writing it back produces model:null and a provider rejection.
+            openRouterModel = oai.string("openrouter_model")
+                .takeUnless { it == OPENROUTER_WEBSITE_MODEL }
+                .orEmpty(),
             openAiModel = oai.string("openai_model"),
         )
     }
@@ -206,6 +243,7 @@ class SettingsRepository(private val engine: EngineClient) {
         const val PATH_SECRETS_WRITE = "/api/secrets/write"
         const val SECRET_LABEL = "SillyTavern Android"
         const val MAX_ERROR_LINE = 200
+        const val OPENROUTER_WEBSITE_MODEL = "OR_Website"
     }
 }
 

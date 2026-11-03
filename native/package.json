@@ -6,7 +6,8 @@
   "description": "Reference capture and headless prompt-assembly parity harness for the native client.",
   "scripts": {
     "capture:reference": "node test/capture-reference.mjs",
-    "test:headless": "node test/build-headless.mjs"
+    "test:headless": "node test/build-headless.mjs",
+    "test:custom-source": "node test/custom-source.mjs"
   },
   "dependencies": {
     "jsdom": "26.1.0"

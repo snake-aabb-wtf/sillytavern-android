@@ -280,8 +280,45 @@ class SettingsRepositoryTest {
         assertEquals(ChatProvider.OPENAI, config.provider)
         assertEquals("https://old.example/v1", config.baseUrl)
         assertEquals("old-custom", config.customModel)
-        assertEquals("OR_Website", config.openRouterModel)
+        assertEquals("the OR_Website sentinel is not a model", "", config.openRouterModel)
         assertEquals("gpt-4-turbo", config.openAiModel)
+    }
+
+    @Test
+    fun loadTreatsTheOpenRouterSentinelAsEmpty() = runBlocking {
+        // `getChatCompletionModel` returns null for OR_Website (openai.js:1734-1735),
+        // so showing it as a model and saving it back sends model:null.
+        assertEquals("", repo.load().openRouterModel)
+    }
+
+    @Test
+    fun loadThrowsOnNonObjectOaiSettings() {
+        servedSettings = """{"oai_settings": "not-an-object"}"""
+
+        val error = assertThrows(SettingsFormatException::class.java) { runBlocking { repo.load() } }
+        assertTrue(error.message!!.contains("oai_settings is not an object"))
+    }
+
+    @Test
+    fun saveTreatsA200WithoutResultOkAsFailure() {
+        // settings.js:206-215 sends the caught Error without a status; JSON.stringify
+        // of an Error is `{}`, so a real failed write looks like 200 {}.
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = when (request.path) {
+                "/csrf-token" -> jsonResponse("""{"token":"tok"}""")
+                "/api/settings/get" -> jsonResponse(settingsEnvelope(DEFAULT_SETTINGS))
+                "/api/settings/save" -> jsonResponse("{}")
+                else -> MockResponse().setResponseCode(404)
+            }
+        }
+
+        val error = assertThrows(SettingsSaveException::class.java) {
+            runBlocking {
+                repo.save(ProviderConfig(provider = ChatProvider.OPENAI, openAiModel = "gpt-4o"), null)
+            }
+        }
+        assertTrue("must say it was not confirmed: ${error.message}", error.message!!.contains("未确认"))
+        assertTrue("must show what the server sent: ${error.message}", error.message!!.contains("{}"))
     }
 
     // ------------------------------------------------------------------

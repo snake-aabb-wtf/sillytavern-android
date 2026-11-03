@@ -237,10 +237,11 @@ private fun SettingsForm(
 
         Spacer(Modifier.height(8.dp))
         Text(
-            // The prompt builder boots the web client once per server process and
-            // reads settings.json at that point, so a new provider takes effect on
-            // the next app start, not on the next message.
-            text = "保存后重启应用，新的连接设置才会生效。",
+            // Node runs inside the app process and the prompt builder loads settings
+            // when that process starts. Only killing the process (swipe the app off
+            // recents, or force stop in system settings) rebuilds the builder; simply
+            // reopening the activity keeps the old provider in memory.
+            text = "保存后需彻底退出应用再打开才会生效：从最近任务中划掉本应用（或在系统设置中强制停止），然后重新打开。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

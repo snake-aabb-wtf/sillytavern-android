@@ -7,7 +7,7 @@ import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.sol.sillytavern.native.data.ChatProvider
 import com.sol.sillytavern.native.data.ProviderConfig
-import com.sol.sillytavern.native.data.SettingsRepository
+import com.sol.sillytavern.native.data.SettingsStore
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -47,7 +47,7 @@ sealed interface SettingsUiState {
  * stay in [ProviderConfig] and in `settings.json`, so switching back does not lose
  * the URL or model that was typed before.
  */
-class SettingsVM(private val repository: SettingsRepository) : ViewModel() {
+class SettingsVM(private val repository: SettingsStore) : ViewModel() {
 
     private val _state = MutableStateFlow<SettingsUiState>(SettingsUiState.Loading)
     val state: StateFlow<SettingsUiState> = _state.asStateFlow()
@@ -75,7 +75,15 @@ class SettingsVM(private val repository: SettingsRepository) : ViewModel() {
         }
     }
 
-    fun selectProvider(provider: ChatProvider) = edit { copy(config = config.copy(provider = provider)) }
+    fun selectProvider(provider: ChatProvider) = edit {
+        if (provider == config.provider) {
+            this
+        } else {
+            // A key typed for one provider must never be written under another:
+            // the secret key name is derived from the selection at save time.
+            copy(config = config.copy(provider = provider), apiKey = "")
+        }
+    }
 
     fun setBaseUrl(value: String) = edit { copy(config = config.copy(baseUrl = value)) }
 
@@ -99,20 +107,10 @@ class SettingsVM(private val repository: SettingsRepository) : ViewModel() {
         val current = _state.value as? SettingsUiState.Ready ?: return
         if (current.saving) return
 
-        // The web client refuses a custom URL that is not absolute before it ever
-        // posts, which would leave the native turn waiting on a request that is
-        // never built. Reject it here with a readable reason instead.
-        if (current.config.provider == ChatProvider.CUSTOM) {
-            val url = current.config.baseUrl.trim()
-            if (!url.startsWith("http://", ignoreCase = true) &&
-                !url.startsWith("https://", ignoreCase = true)
-            ) {
-                _state.value = current.copy(
-                    saved = false,
-                    error = "Base URL 必须以 http:// 或 https:// 开头",
-                )
-                return
-            }
+        val invalid = validationError(current.config)
+        if (invalid != null) {
+            _state.value = current.copy(saved = false, error = invalid)
+            return
         }
 
         _state.value = current.copy(saving = true, saved = false, error = null)
@@ -129,6 +127,34 @@ class SettingsVM(private val repository: SettingsRepository) : ViewModel() {
             val now = _state.value as? SettingsUiState.Ready ?: return@launch
             _state.value = now.copy(saving = false, saved = true, error = null, apiKey = "")
         }
+    }
+
+    /**
+     * What must be filled before a save can mean anything.
+     *
+     * The web client refuses a custom URL that is not absolute before it ever posts
+     * (`openai.js:4475`), and a blank model becomes `model: null` in the request
+     * (or, for OpenRouter's `OR_Website` sentinel, is treated as no model at all),
+     * which the provider rejects after the screen said 已保存.
+     */
+    private fun validationError(config: ProviderConfig): String? = when (config.provider) {
+        ChatProvider.CUSTOM -> {
+            val url = config.baseUrl.trim()
+            when {
+                !url.startsWith("http://", ignoreCase = true) &&
+                    !url.startsWith("https://", ignoreCase = true) ->
+                    "Base URL 必须以 http:// 或 https:// 开头"
+
+                config.customModel.isBlank() -> "请填写模型名"
+                else -> null
+            }
+        }
+
+        ChatProvider.OPENROUTER ->
+            if (config.openRouterModel.isBlank()) "请填写 OpenRouter 模型名" else null
+
+        ChatProvider.OPENAI ->
+            if (config.openAiModel.isBlank()) "请填写 OpenAI 模型名" else null
     }
 
     /**
@@ -152,7 +178,7 @@ class SettingsVM(private val repository: SettingsRepository) : ViewModel() {
     }
 
     companion object {
-        fun of(repository: SettingsRepository): ViewModelProvider.Factory = viewModelFactory {
+        fun of(repository: SettingsStore): ViewModelProvider.Factory = viewModelFactory {
             initializer { SettingsVM(repository) }
         }
     }

@@ -54,6 +54,15 @@ jobs:
         working-directory: native
         run: npm run test:headless
 
+      # The gate used to require the default 'openai' source, so a saved custom
+      # or OpenRouter preset would never reach ready after a restart (and the
+      # parity capture, which is always openai, could not catch it). This boots
+      # the builder against a custom-source data root and asserts it produces a
+      # body; no provider is contacted.
+      - name: Assert a custom-source build reaches READY
+        working-directory: native
+        run: npm run test:custom-source
+
       # The step above runs against the unpruned checkout. Re-run the fixtures
       # against a copy pruned by the same script staging uses, so an asset that
       # jsdom actually needs cannot hide in webfonts/img/css/sounds and ship.
