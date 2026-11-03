@@ -53,6 +53,13 @@ sealed interface ChatUiState {
         val title: String,
         val messages: List<ChatLine>,
         val streaming: Boolean = false,
+        /**
+         * The turn is complete and its write is in flight. Distinct from
+         * [streaming] so the composer can stop offering 停止 once there is
+         * nothing left to cancel, while still refusing a new turn that would
+         * cancel the write.
+         */
+        val finalizing: Boolean = false,
     ) : ChatUiState
 }
 
@@ -127,7 +134,7 @@ class ChatVM(
         val input = text.trim()
         if (input.isEmpty()) return
         val current = _state.value as? ChatUiState.Ready ?: return
-        if (current.streaming) return
+        if (current.streaming || current.finalizing) return
 
         val withUser = current.messages +
             ChatLine(
@@ -142,10 +149,16 @@ class ChatVM(
         turnJob = viewModelScope.launch { runTurn(input) }
     }
 
-    /** Cancels the in-flight turn immediately, keeping whatever text already arrived. */
+    /**
+     * Cancels the in-flight turn immediately, keeping whatever text already arrived.
+     *
+     * A turn that already reached [ChatEvent.Done] is not cancellable: it has no
+     * `raw`-less line left to mark, and treating a finished reply as a stopped
+     * fragment would write the file without the turn the user can see.
+     */
     fun stop() {
         val current = _state.value as? ChatUiState.Ready ?: return
-        if (!current.streaming) return
+        if (!current.streaming || current.finalizing) return
         turnJob?.cancel()
         turnJob = null
 
@@ -261,7 +274,7 @@ class ChatVM(
             stopped = false,
             raw = messageRaw(text, isUser = false, name = messages[index].name),
         )
-        _state.value = current.copy(messages = messages)
+        _state.value = current.copy(messages = messages, finalizing = true)
 
         reportSaveFailure(persistLatest())
         finishStreaming()
@@ -280,7 +293,7 @@ class ChatVM(
         }
         // An error is a UI notice, not a chat message: [persisted] filters it out.
         messages += ChatLine(text = message, isUser = false, error = true)
-        _state.value = current.copy(messages = messages)
+        _state.value = current.copy(messages = messages, finalizing = true)
 
         // The user's line is real even though the reply is not; persist it alone.
         reportSaveFailure(persistLatest())
@@ -331,7 +344,7 @@ class ChatVM(
 
     private fun finishStreaming() {
         val ready = _state.value as? ChatUiState.Ready ?: return
-        _state.value = ready.copy(streaming = false)
+        _state.value = ready.copy(streaming = false, finalizing = false)
     }
 
     /**

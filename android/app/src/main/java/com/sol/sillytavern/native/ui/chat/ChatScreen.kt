@@ -8,9 +8,12 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.exclude
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -68,11 +71,16 @@ fun ChatScreen(
             if (ready != null) {
                 Composer(
                     streaming = ready.streaming,
+                    finalizing = ready.finalizing,
                     onSend = onSend,
                     onStop = onStop,
-                    // MainActivity pads the root by the IME inset; this keeps the
-                    // composer above the keyboard when that inset is reported here.
-                    modifier = Modifier.imePadding(),
+                    // The root pads the system bars (nav bar included), so only the
+                    // IME inset *above* the nav bar is still missing here; padding
+                    // the full IME inset as well would lift the composer one
+                    // nav-bar height off the keyboard.
+                    modifier = Modifier.windowInsetsPadding(
+                        WindowInsets.ime.exclude(WindowInsets.navigationBars),
+                    ),
                 )
             }
         },
@@ -195,6 +203,7 @@ private fun MessageBubble(line: ChatLine, streaming: Boolean) {
 @Composable
 private fun Composer(
     streaming: Boolean,
+    finalizing: Boolean,
     onSend: (String) -> Unit,
     onStop: () -> Unit,
     modifier: Modifier = Modifier,
@@ -203,7 +212,7 @@ private fun Composer(
 
     fun submit() {
         val message = text.trim()
-        if (message.isEmpty() || streaming) return
+        if (message.isEmpty() || streaming || finalizing) return
         onSend(message)
         text = ""
     }
@@ -223,10 +232,12 @@ private fun Composer(
                 keyboardActions = KeyboardActions(onSend = { submit() }),
             )
             Spacer(modifier = Modifier.width(8.dp))
-            if (streaming) {
-                FilledTonalButton(onClick = onStop) { Text("停止") }
-            } else {
-                Button(onClick = { submit() }, enabled = text.isNotBlank()) { Text("发送") }
+            when {
+                // `Done` has arrived: the reply is final, so there is nothing to
+                // stop. Showing 停止 here let a tap discard a completed turn.
+                finalizing -> Button(onClick = {}, enabled = false) { Text("发送") }
+                streaming -> FilledTonalButton(onClick = onStop) { Text("停止") }
+                else -> Button(onClick = { submit() }, enabled = text.isNotBlank()) { Text("发送") }
             }
         }
     }

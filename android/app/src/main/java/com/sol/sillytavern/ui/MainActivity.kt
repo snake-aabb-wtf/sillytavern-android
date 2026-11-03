@@ -162,8 +162,9 @@ class MainActivity : ComponentActivity() {
      * splash/error overlays) by the system bars and cutout so the content stays reachable.
      *
      * The IME inset is deliberately not applied here. The Compose chat screen pads its
-     * composer with `imePadding()`; padding the root as well would lift the composer a
-     * second keyboard-height above the keyboard. No other screen hosts a text field.
+     * composer by the IME inset minus the nav bar (which this root already covers);
+     * padding the root by the IME as well would lift the composer a keyboard-height
+     * above the keyboard. No other screen hosts a text field.
      */
     private fun applyWindowInsets() {
         ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
