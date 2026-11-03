@@ -109,4 +109,7 @@ dependencies {
     // SSE reader in task 5 targets, without the 5.x alpha/RT guarantees.
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     testImplementation("junit:junit:4.13.2")
+    // JVM-only unit tests drive the engine client against a real HTTP socket;
+    // MockWebServer needs no Android runtime, unlike Robolectric.
+    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
 }
