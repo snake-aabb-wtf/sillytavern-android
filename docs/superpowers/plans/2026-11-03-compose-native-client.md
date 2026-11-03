@@ -391,36 +391,46 @@ git commit -m "feat(android): chat screen with streaming replies"
 
 ---
 
-### Task 9: 剔除 `public/` 并打包验证
+### Task 9: 精简 `public/` 并打包验证
+
+**修正（Ruling R9）：`public/` 不能删。** 无头组装器从 `public/` 加载页面与客户端模块——
+`native/prompt-builder/index.mjs:208`（`publicDir`）、`:260`（`scripts/openai.js`）、`:277`（`scripts/extensions.js`），
+`dom-host.mjs:526` 还要 `index.html`。删掉整个目录会让原生聊天彻底失效。改为**只删 jsdom 永远不读的静态资源**。
 
 **Files:**
 - Modify: `scripts/stage-runtime.sh`
 - Modify: `docs/ACCEPTANCE.md`（新增原生验收项）
 
 **Interfaces:**
-- Produces: `dist/runtime.zip` 不含 `public/`；APK 可安装、可聊天。
+- Produces: `dist/runtime.zip` 中的 `server/public/` 保留 `index.html`、`script.js`、`script.js` 的模块图（`scripts/`）、`lib/`（含 `lib.bundle.js`）、`locales/`；删除字体/图片/CSS/图标等纯视觉资源。
 
-- [ ] **Step 1: 改打包脚本**
+- [ ] **Step 1: 在拷贝后精简**
 
-`stage-runtime.sh` 在拷贝服务端源码后 `rm -rf "$SERVER_DIR/public"`；保留 `public/lib.js`？否——`lib.js` 是前端 bundle，一并删除；确认 `src/` 内无运行时读取 `public/` 的路径（grep 结果只有 `server-main.js:221/242` 与 `users.js:1057`）。
+在 `stage-runtime.sh` 里 `cp public/lib.bundle.js` 之后、打包之前，删除：
+`webfonts/`、`img/`、`css/`、`style.css`、`sounds/`、`*.ico`、`favicon.ico`。
+保留清单外的任何东西都不动。删除前 `[[ -f "$SERVER_DIR/public/index.html" ]]` 与 `[[ -s "$SERVER_DIR/public/lib.bundle.js" ]]` 必须成立，缺失即 `die`。
 
-- [ ] **Step 2: 不碰子树**
+- [ ] **Step 2: 用精简后的树再跑一次 parity**
 
-不修改 `SillyTavern/src/`。输出已确认：`src/` 仅在 `server-main.js:221/242`（静态页）与 `users.js:1057`（登录页）引用 `public/`，原生客户端都不会请求这些路径；缺失目录时 `express.static` 直接跳过。若真机上出现 500，记录到 HANDOFF 再单独处理。
+精简后必须证明模型收到的请求体没变。用 `createBuilder({ serverDir })` 指向一份「按 Step 1 精简过的 server 目录」副本，跑三个 parity 夹具：
+`node native/test/build-headless.mjs`（若 CLI 不接受 `--server-dir`，加一个环境变量 `NATIVE_SERVER_DIR` 覆盖默认值，属 `native/` 范围）。
+Expected: 3/3 逐字段相等，`IGNORED_PATHS` 仍为空。这一步是本任务的门禁——不通过就不许删。
 
-- [ ] **Step 3: CI 出包并验证**
+- [ ] **Step 3: 不碰子树**
 
-Run: 推送后 Actions `android`。
-Expected: APK 体积下降 ≥ 12 MB；真机上冷启动、角色列表、发消息均正常（引擎不依赖 `public/`）。
+不修改 `SillyTavern/src/`。`src/` 里只有 `server-main.js:221/242`（静态页）与 `users.js:1057`（登录页）引用 `public/`，原生客户端都不请求；`express.static` 对缺失目录直接跳过。真机若出现 500，记进 HANDOFF 单独处理。
 
-- [ ] **Step 4: 更新验收清单并提交**
+- [ ] **Step 4: CI 出包并记录体积**
+
+Run: Actions `android`（`workflow_dispatch`，ref `feature/compose-ui`）。
+Expected: `assembleDebug` 成功，APK 体积下降 ≥ 10 MB（`webfonts` 9.4 MB + `img` 1.2 MB + `css`/图标 0.8 MB）。记录精简前后两个数字。
+
+- [ ] **Step 5: 更新验收清单并提交**
 
 ```bash
 git add scripts/stage-runtime.sh docs/ACCEPTANCE.md
-git commit -m "build: drop the web UI assets from the runtime"
+git commit -m "build: drop the browser-only assets from the runtime"
 ```
-
----
 
 ### Task 10: 端到端回归与文档
 
