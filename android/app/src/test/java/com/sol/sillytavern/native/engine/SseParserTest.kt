@@ -63,6 +63,19 @@ class SseParserTest {
     }
 
     @Test
+    fun crlfFramingEmitsEvents() {
+        // Upstream providers are forwarded verbatim, so CRLF-only framing must
+        // split events and terminate [DONE] just like LF framing.
+        val parser = SseParser()
+
+        val events = parser.feed("data: $payload\r\n\r\ndata: [DONE]\r\n".toByteArray(Charsets.UTF_8))
+
+        assertEquals(2, events.size)
+        assertEquals(payload, parser.takeEvent(events[0]))
+        assertEquals("[DONE]", parser.takeEvent(events[1]))
+    }
+
+    @Test
     fun doneWithoutTrailingNewline() {
         val parser = SseParser()
 

@@ -15,7 +15,7 @@ import java.nio.charset.StandardCharsets
  * must be tolerated:
  *
  *  - an event split across reads: [feed] keeps undecoded text until a blank
- *    line arrives;
+ *    line arrives, accepting both LF and CRLF framing;
  *  - a UTF-8 code point split across reads: one [CharsetDecoder] is reused and
  *    the bytes it could not consume stay pending for the next [feed]. Decoding
  *    each chunk independently would turn a split emoji into two U+FFFD.
@@ -27,6 +27,9 @@ class SseParser {
     private val decoder: CharsetDecoder = StandardCharsets.UTF_8.newDecoder()
         .onMalformedInput(CodingErrorAction.REPORT)
         .onUnmappableCharacter(CodingErrorAction.REPORT)
+
+    /** SSE allows LF or CRLF line endings; providers are not consistent. */
+    private val eventBoundary = Regex("\r?\n\r?\n")
 
     /** Bytes held back because they are a prefix of an incomplete code point. */
     private var pending = ByteArray(0)
@@ -46,12 +49,12 @@ class SseParser {
         decode(bytes)
 
         val events = mutableListOf<String>()
-        var boundary = text.indexOf("\n\n")
-        while (boundary >= 0) {
-            val event = text.substring(0, boundary)
-            text.delete(0, boundary + 2)
+        var boundary = eventBoundary.find(text)
+        while (boundary != null) {
+            val event = text.substring(0, boundary.range.first)
+            text.delete(0, boundary.range.last + 1)
             if (event.isNotBlank()) events.add(event)
-            boundary = text.indexOf("\n\n")
+            boundary = eventBoundary.find(text)
         }
 
         // [DONE] can be the last bytes on the socket: no blank line follows, so

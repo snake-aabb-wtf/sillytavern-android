@@ -4,8 +4,10 @@ import java.io.IOException
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.buffer
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -116,13 +118,15 @@ class EngineClient(baseUrl: String, client: OkHttpClient = OkHttpClient()) {
      * Streams one chat turn.
      *
      * The flow emits [ChatEvent.Delta] per text chunk, then exactly one terminal
-     * event: [ChatEvent.Done], [ChatEvent.Failure], or an exception. A 403 is
-     * retried like [postJson]; a second 403 closes the flow with
+     * event: [ChatEvent.Done], [ChatEvent.Failure], or an exception. EOF without
+     * a terminal frame is reported as a failure, never as a completed answer. A
+     * 403 is retried like [postJson]; a second 403 closes the flow with
      * [EngineError.Csrf].
      */
     fun stream(path: String, body: JsonElement): Flow<ChatEvent> = callbackFlow {
         val callRef = AtomicReference<Call?>(null)
         val worker = launch(Dispatchers.IO) {
+            var terminal = false
             try {
                 token()
                 var call = newJsonCall(path, body)
@@ -142,19 +146,22 @@ class EngineClient(baseUrl: String, client: OkHttpClient = OkHttpClient()) {
                 }
                 response.use { resp ->
                     if (!resp.isSuccessful) {
-                        trySend(failureFor(resp))
+                        send(ChatEvent.Failure(failureMessage(resp)))
+                        terminal = true
                         return@use
                     }
                     val contentType = resp.header("Content-Type").orEmpty()
                     if (!contentType.contains("text/event-stream", ignoreCase = true)) {
                         // A 200 that is not a stream is an error the server chose
                         // to phrase as JSON (for example a misrouted request).
-                        trySend(ChatEvent.Failure("Unexpected content-type: $contentType"))
+                        send(ChatEvent.Failure("Unexpected content-type: $contentType"))
+                        terminal = true
                         return@use
                     }
                     val source = resp.body?.source()
                     if (source == null) {
-                        trySend(ChatEvent.Failure("Empty response body"))
+                        send(ChatEvent.Failure("Empty response body"))
+                        terminal = true
                         return@use
                     }
 
@@ -167,21 +174,30 @@ class EngineClient(baseUrl: String, client: OkHttpClient = OkHttpClient()) {
                             val data = parser.takeEvent(event) ?: continue
                             when {
                                 isErrorEvent(event) -> {
-                                    trySend(ChatEvent.Failure(errorMessage(data)))
+                                    send(ChatEvent.Failure(errorMessage(data)))
+                                    terminal = true
                                     close()
                                     return@use
                                 }
                                 data == "[DONE]" -> {
-                                    trySend(ChatEvent.Done)
+                                    send(ChatEvent.Done)
+                                    terminal = true
                                     close()
                                     return@use
                                 }
                                 else -> {
                                     val delta = deltaText(data)
-                                    if (!delta.isNullOrEmpty()) trySend(ChatEvent.Delta(delta))
+                                    if (!delta.isNullOrEmpty()) send(ChatEvent.Delta(delta))
                                 }
                             }
                         }
+                    }
+                    // A truncated connection must not look like a finished
+                    // answer: the route always terminates with [DONE] or an
+                    // error frame, so EOF here means the stream was cut.
+                    if (!terminal && isActive) {
+                        send(ChatEvent.Failure("stream ended without [DONE]"))
+                        terminal = true
                     }
                 }
                 close()
@@ -197,7 +213,10 @@ class EngineClient(baseUrl: String, client: OkHttpClient = OkHttpClient()) {
             callRef.get()?.cancel()
             worker.cancel()
         }
-    }
+        // The reader must never block on a slow renderer: with the default
+        // 64-element buffer a long reply could fill it and trySend would drop
+        // text (including the terminal event) without a trace.
+    }.buffer(Channel.UNLIMITED)
 
     private suspend fun refreshToken(): String = tokenLock.withLock {
         cachedToken = null
@@ -227,31 +246,46 @@ class EngineClient(baseUrl: String, client: OkHttpClient = OkHttpClient()) {
 
     private fun url(path: String): String = "$root/${path.trimStart('/')}"
 
-    /** Reads at most the first 200 bytes of an error body for the message. */
-    private fun failureFor(response: Response): ChatEvent.Failure {
+    /**
+     * Builds the failure message for a non-2xx response.
+     *
+     * A JSON body carries the server's `error` field, so it is read and parsed
+     * as a whole (up to [MAX_JSON_ERROR_BYTES]); truncating it to 200 bytes
+     * would destroy the cause. Only a non-JSON body falls back to the short
+     * diagnostic snippet the brief specifies.
+     */
+    private fun failureMessage(response: Response): String {
+        val contentType = response.header("Content-Type").orEmpty()
+        val jsonBody = contentType.contains("json", ignoreCase = true)
+        val snippet = readBounded(response, if (jsonBody) MAX_JSON_ERROR_BYTES else MAX_TEXT_ERROR_BYTES)
+        return if (jsonBody) {
+            runCatching {
+                json.parseToJsonElement(snippet).jsonObject["error"]?.jsonPrimitive?.contentOrNull
+            }.getOrNull()?.takeIf { it.isNotBlank() } ?: "HTTP ${response.code}"
+        } else {
+            val text = snippet.trim()
+            if (text.isEmpty()) "HTTP ${response.code}" else "HTTP ${response.code}: $text"
+        }
+    }
+
+    private fun readBounded(response: Response, limit: Int): String {
         val buffer = Buffer()
         response.body?.source()?.let { source ->
-            var remaining = MAX_ERROR_SNIPPET.toLong()
+            var remaining = limit.toLong()
             while (remaining > 0) {
                 val read = source.read(buffer, remaining)
                 if (read == -1L) break
                 remaining -= read
             }
         }
-        val snippet = buffer.readUtf8()
-        val contentType = response.header("Content-Type").orEmpty()
-        val message = if (contentType.contains("json", ignoreCase = true) && snippet.isNotBlank()) {
-            runCatching {
-                json.parseToJsonElement(snippet).jsonObject["error"]?.jsonPrimitive?.contentOrNull
-            }.getOrNull() ?: "HTTP ${response.code}"
-        } else {
-            "HTTP ${response.code}"
-        }
-        return ChatEvent.Failure(message)
+        return buffer.readUtf8()
     }
 
     private fun isErrorEvent(event: String): Boolean =
-        event.split('\n').any { it.trim() == "event: error" }
+        event.split('\n').any { raw ->
+            val line = raw.trimEnd('\r')
+            line.startsWith("event:") && line.substring("event:".length).trim() == "error"
+        }
 
     private fun errorMessage(data: String): String = runCatching {
         json.parseToJsonElement(data).jsonObject["error"]?.jsonPrimitive?.contentOrNull
@@ -279,7 +313,8 @@ class EngineClient(baseUrl: String, client: OkHttpClient = OkHttpClient()) {
 
     private companion object {
         val JSON = "application/json; charset=utf-8".toMediaType()
-        const val MAX_ERROR_SNIPPET = 200
+        const val MAX_TEXT_ERROR_BYTES = 200
+        const val MAX_JSON_ERROR_BYTES = 64 * 1024
     }
 }
 
