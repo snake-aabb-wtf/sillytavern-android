@@ -1,0 +1,57 @@
+name: Native parity
+
+# Task 1 of the native-client plan: capture the real web UI's /generate bodies.
+# SillyTavern's dependencies and the Playwright browser cannot be installed on
+# the 1.9 GB build host, so this workflow is the required environment.
+on:
+  push:
+    branches:
+      - feature/compose-ui
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-parity-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  capture:
+    name: Capture reference /generate bodies
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Only needed to boot the real server; the capture script itself does not
+      # import server packages.
+      - name: Install SillyTavern dependencies
+        working-directory: SillyTavern
+        run: npm ci --no-audit --no-fund
+
+      - name: Install native harness dependencies
+        working-directory: native
+        run: npm ci --no-audit --no-fund
+
+      - name: Install Chromium
+        working-directory: native
+        run: npx playwright install --with-deps chromium
+
+      - name: Capture reference requests
+        working-directory: native
+        run: npm run capture:reference
+
+      - name: Upload reference captures
+        uses: actions/upload-artifact@v4
+        with:
+          name: reference-generate-bodies
+          path: fixtures/reference
+          if-no-files-found: error
+          retention-days: 14

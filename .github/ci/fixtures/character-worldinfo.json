@@ -1,0 +1,47 @@
+{
+  "spec": "chara_card_v2",
+  "spec_version": "2.0",
+  "data": {
+    "name": "Fixture Worldinfo",
+    "description": "A calm test character with an embedded lorebook.",
+    "personality": "",
+    "scenario": "",
+    "first_mes": "Hello.",
+    "mes_example": "",
+    "creator_notes": "",
+    "system_prompt": "",
+    "post_history_instructions": "",
+    "alternate_greetings": [],
+    "tags": [],
+    "creator": "",
+    "character_version": "",
+    "extensions": {
+      "world": "Fixture Apple Lore"
+    },
+    "group_only_greetings": [],
+    "character_book": {
+      "name": "Fixture Apple Lore",
+      "description": "",
+      "scan_depth": 2,
+      "token_budget": 500,
+      "recursive_scanning": false,
+      "extensions": {},
+      "entries": [
+        {
+          "id": 0,
+          "keys": [
+            "apple"
+          ],
+          "secondary_keys": [],
+          "content": "APPLE FACT: apples are red.",
+          "enabled": true,
+          "insertion_order": 100,
+          "case_sensitive": false,
+          "name": "Apple fact",
+          "priority": 10,
+          "extensions": {}
+        }
+      ]
+    }
+  }
+}

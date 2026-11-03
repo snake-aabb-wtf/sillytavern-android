@@ -1,0 +1,14 @@
+{
+  "name": "sillytavern-native-parity",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Reference capture and headless prompt-assembly parity harness for the native client.",
+  "scripts": {
+    "capture:reference": "node test/capture-reference.mjs"
+  },
+  "devDependencies": {
+    "jsdom": "26.1.0",
+    "playwright": "1.64.1"
+  }
+}

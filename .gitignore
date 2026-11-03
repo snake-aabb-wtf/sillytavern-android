@@ -6,6 +6,8 @@ android/nodejs-mobile/
 android/app/src/main/assets/runtime.zip
 SillyTavern/node_modules/
 SillyTavern/dist/
+native/node_modules/
+fixtures/reference/
 dist/
 *.iml
 .idea/

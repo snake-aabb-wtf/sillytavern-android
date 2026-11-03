@@ -1,0 +1,12 @@
+[
+  {
+    "name": "Fixture Plain",
+    "is_user": false,
+    "mes": "Hello."
+  },
+  {
+    "name": "User",
+    "is_user": true,
+    "mes": "Tell me about apples."
+  }
+]
