@@ -41,7 +41,10 @@ export const STATUS_PATH = '/api/backends/chat-completions/status';
 // a PromptManager dry-run re-render (measured at 1-4 s per turn), while the
 // error path just unblocks generation. build() swallows the rejection it
 // causes; page-originated chat saves are blocked, so nothing is persisted.
-export const STUB_FAILURE_BODY = JSON.stringify({ error: { message: 'native prompt capture stub' } });
+// Deliberately empty: a JSON error body makes the client show a toast (and
+// that toast's DOM/animation work costs a second in jsdom), while an empty
+// body still fails the response cleanly with the same status.
+export const STUB_FAILURE_BODY = '';
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -229,7 +232,7 @@ export async function createBuilder({ dataDir, port, serverDir = DEFAULT_SERVER_
                     }
                     return new Response(STUB_FAILURE_BODY, {
                         status: 500,
-                        headers: { 'content-type': 'application/json' },
+                        headers: { 'content-type': 'text/plain' },
                     });
                 }
                 if (url.includes(STATUS_PATH)) {
@@ -246,6 +249,23 @@ export async function createBuilder({ dataDir, port, serverDir = DEFAULT_SERVER_
         await stopServer(child);
         fs.rmSync(workRoot, { recursive: true, force: true });
         throw error;
+    }
+
+    // PromptManager re-renders the context-composition panel after every
+    // message, and each render runs a full dry-run prompt assembly inside
+    // jsdom (measured ~2 s per turn) purely to draw the panel. It cannot affect
+    // the /generate body, so disable the debounced re-render for this headless
+    // client. The one-shot render done while the manager is created stays.
+    try {
+        const openaiUrl = pathToFileURL(path.join(serverDir, 'public', 'scripts', 'openai.js')).href;
+        const openai = await import(openaiUrl);
+        if (openai.promptManager?.renderDebounced) {
+            openai.promptManager.renderDebounced = () => {};
+        } else {
+            log('[builder] PromptManager not initialised; its re-render stays enabled');
+        }
+    } catch (error) {
+        log(`[builder] could not disable PromptManager re-render: ${error?.message || error}`);
     }
 
     const { window } = host;
@@ -478,17 +498,23 @@ export async function createBuilder({ dataDir, port, serverDir = DEFAULT_SERVER_
         if (!sendButton) throw new Error('#send_but is missing');
 
         let record;
+        let generationSettled = null;
         try {
             log(`[builder] triggering send (generating=${host.app?.isGenerating?.()})`);
             // Call the exported send path directly instead of clicking: the
             // click handler only wraps it in a mutex and leaves its promise
             // unattached, which would turn the stub's intentional rejection
-            // into an unhandled rejection in the host process.
+            // into an unhandled rejection in the host process. Its settlement
+            // is also the precise "generation finished" signal; polling
+            // isGenerating() can lag behind a busy jsdom event loop.
             const sendTextareaMessage = host.app?.sendTextareaMessage;
             if (typeof sendTextareaMessage === 'function') {
                 const generation = sendTextareaMessage();
-                if (typeof generation?.catch === 'function') {
-                    generation.catch(error => log(`[builder] stub generation rejected (expected): ${error?.message || error}`));
+                if (typeof generation?.then === 'function') {
+                    generationSettled = generation.then(
+                        () => {},
+                        error => log(`[builder] stub generation rejected (expected): ${error?.message || error}`),
+                    );
                 }
             } else {
                 sendButton.click();
@@ -503,9 +529,11 @@ export async function createBuilder({ dataDir, port, serverDir = DEFAULT_SERVER_
             mark('capture');
 
             // The fetch intercept resolves before the client reacts to the
-            // stub. Wait until it leaves the generating state, so no client
-            // work can touch the chat/metadata after the rollback below.
-            if (typeof host.app?.isGenerating === 'function') {
+            // stub. Wait until the send path has settled, so no client work can
+            // touch the chat/metadata after the rollback below.
+            if (generationSettled) {
+                await Promise.race([generationSettled, delay(30_000)]);
+            } else if (typeof host.app?.isGenerating === 'function') {
                 try {
                     await host.waitFor(() => !host.app.isGenerating(), {
                         timeoutMs: 30_000,
