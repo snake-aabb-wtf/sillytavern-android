@@ -12,6 +12,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Modifier
+import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
@@ -21,13 +22,17 @@ import androidx.navigation.navArgument
 import com.sol.sillytavern.native.data.CharacterRepository
 import com.sol.sillytavern.native.data.ChatRepository
 import com.sol.sillytavern.native.engine.EngineClient
-import com.sol.sillytavern.native.ui.chat.ChatPlaceholderScreen
+import com.sol.sillytavern.native.ui.chat.ChatScreen
 import com.sol.sillytavern.native.ui.characters.CharactersScreen
 import com.sol.sillytavern.native.ui.chats.ChatsScreen
 import com.sol.sillytavern.native.vm.CharacterSource
 import com.sol.sillytavern.native.vm.CharactersVM
 import com.sol.sillytavern.native.vm.ChatSource
+import com.sol.sillytavern.native.vm.ChatTurn
+import com.sol.sillytavern.native.vm.ChatVM
 import com.sol.sillytavern.native.vm.ChatsVM
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 
 /** Route patterns and builders. Arguments are percent-encoded, never concatenated raw. */
 object Routes {
@@ -117,9 +122,16 @@ fun SolApp(port: Int, onFirstFrame: () -> Unit = {}) {
                 ) { entry ->
                     val avatar = entry.arguments?.getString(Routes.ARG_AVATAR).orEmpty()
                     val file = entry.arguments?.getString(Routes.ARG_FILE).orEmpty()
-                    ChatPlaceholderScreen(
-                        avatar = avatar,
-                        file = file,
+                    val chatVM: ChatVM = viewModel(
+                        factory = client.chatVMFactory(avatar, file),
+                    )
+                    val state by chatVM.state.collectAsState()
+                    ChatScreen(
+                        title = file.removeSuffix(".jsonl"),
+                        state = state,
+                        onSend = chatVM::send,
+                        onStop = chatVM::stop,
+                        onRetry = chatVM::refresh,
                         onBack = { navController.popBackStack() },
                     )
                 }
@@ -146,6 +158,26 @@ private class SolClient(port: Int) {
 
     val characters = CharacterSource { characterRepository.list() }
     val chats = ChatSource { avatar -> chatRepository.list(avatar) }
+
+    /**
+     * One chat turn: the posted body is fixed by `native/endpoints/native-chat.mjs`
+     * (only `send` is implemented server-side today). The `.jsonl` suffix is
+     * stripped because both `/api/chats/get` and the prompt builder append it.
+     */
+    fun chatVMFactory(avatar: String, file: String): ViewModelProvider.Factory {
+        val turn = ChatTurn { input ->
+            engine.stream(
+                "/api/native/chat",
+                buildJsonObject {
+                    put("avatar_url", avatar)
+                    put("file_name", file.removeSuffix(".jsonl"))
+                    put("user_input", input)
+                    put("type", "send")
+                },
+            )
+        }
+        return ChatVM.of(avatar, file, chatRepository, turn)
+    }
 
     /**
      * Avatar bytes come from the public thumbnail route, not `POST /api/avatars/get`
