@@ -266,6 +266,42 @@ function installDomConstructors(window, log) {
     }
 }
 
+/**
+ * Interface names the client references as bare globals. Anything jsdom does
+ * not expose is stubbed so `instanceof` checks and static constants do not
+ * throw; stubs that cannot match real nodes simply make a rendering branch
+ * false, which cannot affect the assembled prompt.
+ */
+const REQUIRED_DOM_GLOBALS = [
+    'HTMLUnknownElement', 'HTMLLinkElement', 'HTMLStyleElement', 'HTMLScriptElement',
+    'HTMLBodyElement', 'HTMLHeadElement', 'HTMLHtmlElement', 'HTMLDocument', 'HTMLTemplateElement',
+    'Document', 'DocumentFragment', 'NodeFilter', 'TreeWalker', 'NodeIterator',
+    'CSSRule', 'CSSStyleRule', 'CSSMediaRule', 'CSSSupportsRule', 'CSSKeyframesRule',
+    'CSSImportRule', 'CSSFontFaceRule', 'CSSPageRule', 'CSSNamespaceRule',
+    'CSSConditionRule', 'CSSGroupingRule', 'XPathResult', 'XPathExpression',
+];
+
+function ensureDomGlobals(window, log) {
+    for (const name of REQUIRED_DOM_GLOBALS) {
+        if (typeof globalThis[name] === 'function') continue;
+        let value = typeof window[name] === 'function' ? window[name] : null;
+        if (!value) {
+            const base = name.startsWith('CSS') ? class {} : (window.HTMLElement ?? class {});
+            value = class extends base {};
+            Object.defineProperty(value, 'name', { value: name, configurable: true });
+            log(`[host] stub DOM global ${name} (jsdom does not expose it)`);
+        }
+        try {
+            Object.defineProperty(globalThis, name, { value, writable: true, configurable: true });
+        } catch (error) {
+            log(`[host] could not install ${name}: ${error?.message || error}`);
+        }
+    }
+    log(`[host] DOM globals: HTMLUnknownElement window=${typeof window.HTMLUnknownElement} ` +
+        `global=${typeof globalThis.HTMLUnknownElement}, HTMLLinkElement window=${typeof window.HTMLLinkElement} ` +
+        `global=${typeof globalThis.HTMLLinkElement}, CSSSupportsRule global=${typeof globalThis.CSSSupportsRule}`);
+}
+
 function installGlobals(window, log) {
     globalThis.window = window;
     for (const key of FORCED_GLOBALS) {
@@ -284,6 +320,7 @@ function installGlobals(window, log) {
     }
     mirrorWindow(window);
     installDomConstructors(window, log);
+    ensureDomGlobals(window, log);
 }
 
 /**
@@ -518,6 +555,7 @@ export async function createDomHost({
     // Pick up the shims (matchMedia, observers, CSSOM rules) on the Node side too.
     mirrorWindow(window);
     installDomConstructors(window, log);
+    ensureDomGlobals(window, log);
     installFetch(window, baseUrl, dom.cookieJar, intercept, log);
 
     // The client uses browser-root-absolute imports (/script.js, /lib.js); map
