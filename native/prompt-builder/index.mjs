@@ -88,6 +88,9 @@ function startServer({ serverDir, configPath, dataDir, port, log }) {
     };
     child.stdout.on('data', collect);
     child.stderr.on('data', collect);
+    child.on('exit', code => {
+        process.stderr.write(`[builder] SillyTavern server exited (${code})\n`);
+    });
     return child;
 }
 
@@ -298,6 +301,12 @@ function argValue(name) {
 }
 
 async function main() {
+    // The client is full of fire-and-forget UI promises. Report them instead
+    // of letting Node abort the whole build on the first one.
+    process.on('unhandledRejection', error => {
+        process.stderr.write(`[builder] unhandled rejection: ${error?.stack || error}\n`);
+    });
+
     const specPath = argValue('--spec');
     if (!specPath) {
         throw new Error('Usage: node prompt-builder/index.mjs --spec <spec.json>');

@@ -131,6 +131,16 @@ function installShims(window) {
     window.CSS.escape ??= value => String(value)
         .replace(/[^a-zA-Z0-9_\u00A0-\uFFFF-]/g, character => `\\${character}`);
 
+    // jsdom does not expose the CSSOM rule constructors; dynamic-styles.js
+    // probes them with instanceof. Empty classes keep the probes false.
+    for (const name of [
+        'CSSRule', 'CSSStyleRule', 'CSSMediaRule', 'CSSSupportsRule', 'CSSKeyframesRule',
+        'CSSImportRule', 'CSSFontFaceRule', 'CSSPageRule', 'CSSNamespaceRule',
+        'CSSConditionRule', 'CSSGroupingRule',
+    ]) {
+        if (!(name in window)) window[name] = class {};
+    }
+
     if (window.navigator && !window.navigator.clipboard) {
         Object.defineProperty(window.navigator, 'clipboard', {
             configurable: true,
@@ -304,7 +314,18 @@ function installFetch(window, baseUrl, jar, intercept, log) {
         if (cookie && !headers.has('cookie')) headers.set('cookie', cookie);
         options.headers = headers;
 
-        const response = await nodeFetch(url, options);
+        let response;
+        try {
+            response = await nodeFetch(url, options);
+        } catch (error) {
+            // Dedicated servers close idle keep-alive sockets; undici can pick
+            // one up in the race and report "other side closed". The body is
+            // an already-serialised string, so one retry is safe.
+            const code = error?.cause?.code ?? error?.code;
+            if (code !== 'UND_ERR_SOCKET' && code !== 'ECONNRESET') throw error;
+            log(`[host] retrying ${url} after ${code}`);
+            response = await nodeFetch(url, options);
+        }
         let setCookies = [];
         try {
             setCookies = typeof response.headers.getSetCookie === 'function'
