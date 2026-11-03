@@ -9,7 +9,6 @@ name: Android
 on:
   push:
     branches:
-      - feature/android-shell
       - main
     tags:
       - 'st-sol-*'

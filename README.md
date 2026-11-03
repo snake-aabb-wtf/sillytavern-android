@@ -49,7 +49,7 @@ MainActivity (Kotlin)
 
 **推荐走 CI**（本机编译 Node 与 152 MB 运行时都不轻松）：
 
-- push 到 `main` / `feature/android-shell` → 产出 APK artifact
+- push 到 `main` → 产出 APK artifact
 - push `st-sol-*` 标签 → 额外发布 GitHub Release
 - 工作流：`.github/workflows/android.yml`；`versionName` 由标签推导（标签构建），分支构建则是 `1.0.<run_number>`
 
