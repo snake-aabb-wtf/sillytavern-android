@@ -268,7 +268,31 @@ export async function createBuilder({ dataDir, port, serverDir = DEFAULT_SERVER_
         log(`[builder] could not disable PromptManager re-render: ${error?.message || error}`);
     }
 
+    // Sending a message schedules debounced chat/metadata saves. They can only
+    // write the builder's stub state, and in jsdom their compression work lands
+    // ~1 s after the send and blocks the turn (measured 1.6 s). The builder
+    // never wants them, so cancel them as soon as the request is captured.
+    let extensionsModule = null;
+    try {
+        extensionsModule = await import(pathToFileURL(path.join(serverDir, 'public', 'scripts', 'extensions.js')).href);
+    } catch (error) {
+        log(`[builder] could not load extension helpers: ${error?.message || error}`);
+    }
+    const cancelPendingSaves = () => {
+        try {
+            host.app?.cancelDebouncedChatSave?.();
+        } catch {
+            // best effort
+        }
+        try {
+            extensionsModule?.cancelDebouncedMetadataSave?.();
+        } catch {
+            // best effort
+        }
+    };
+
     const { window } = host;
+
     const ctx = () => {
         const st = window.SillyTavern ?? globalThis.SillyTavern;
         if (!st?.getContext) throw new Error('window.SillyTavern.getContext is not available');
@@ -527,6 +551,7 @@ export async function createBuilder({ dataDir, port, serverDir = DEFAULT_SERVER_
 
             record = captured ?? await Promise.race([capturedPromise, timeout]);
             mark('capture');
+            cancelPendingSaves();
 
             // The fetch intercept resolves before the client reacts to the
             // stub. Wait until the send path has settled, so no client work can
@@ -544,8 +569,10 @@ export async function createBuilder({ dataDir, port, serverDir = DEFAULT_SERVER_
                 }
             }
             mark('generation');
-            // Drain the microtask/queue tail that follows unblockGeneration.
-            await delay(25);
+            cancelPendingSaves();
+            // No drain wait: the failure path appends nothing, the restore below
+            // is the last state change, and waiting on a timer here only parks
+            // the response behind jsdom's pending background work.
             mark('settle');
         } finally {
             try {
