@@ -84,20 +84,21 @@
         </LinearLayout>
     </LinearLayout>
 
-    <!-- Small overlay control: only this 48dp corner consumes touches, the rest of the
-         WebView stays fully interactive. Drawn last so it stays reachable even when the
-         splash or the error panel is up (a failed import must not trap the user). -->
-    <ImageButton
+    <!-- Floating overlay control: draggable, snaps to a side, and remembers its spot, so it
+         no longer covers SillyTavern's own top-right buttons. Only its own disc consumes
+         touches; the rest of the WebView stays fully interactive. Drawn last so it stays
+         reachable even when the splash or the error panel is up (a failed import must not
+         trap the user). Starts invisible: the saved position needs a laid-out parent. -->
+    <com.sol.sillytavern.ui.FloatingGearButton
         android:id="@+id/buttonSettings"
         android:layout_width="48dp"
         android:layout_height="48dp"
-        android:layout_gravity="top|end"
-        android:layout_marginTop="8dp"
-        android:layout_marginEnd="8dp"
+        android:layout_gravity="top|start"
         android:background="@drawable/bg_settings_button"
         android:contentDescription="@string/settings_open"
         android:padding="12dp"
         android:scaleType="centerInside"
         android:src="@drawable/ic_settings"
-        android:tint="@android:color/white" />
+        android:tint="@android:color/white"
+        android:visibility="invisible" />
 </FrameLayout>

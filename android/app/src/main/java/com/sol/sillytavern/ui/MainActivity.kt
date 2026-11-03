@@ -583,7 +583,7 @@ class MainActivity : ComponentActivity() {
         )
     }
 
-    /** Opens the backup screen; the gear only covers its own 48dp corner. */
+    /** Opens the backup screen. The gear is a draggable overlay (FloatingGearButton). */
     private fun openSettings() {
         try {
             startActivity(Intent(this, SettingsActivity::class.java))
