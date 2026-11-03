@@ -107,4 +107,4 @@ bash scripts/verify-patches.sh   # 补丁被上游覆盖时会失败
 
 ## 设备验收
 
-真机上请按 [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md) 的七项逐条确认；CI 只证明能编译与 Node 冒烟，不代替真机检查。
+七项设备验收已于 2026-11-03 在真机上执行，**全部通过**。清单与逐项记录见 [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md)。CI 只证明能编译与 Node 冒烟，不代替真机检查；后续改动运行时、备份或后台保活相关代码时应重跑对应项。
