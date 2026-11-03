@@ -15,6 +15,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import util from 'node:util';
+import { register } from 'node:module';
 import { pathToFileURL } from 'node:url';
 
 import { JSDOM, VirtualConsole } from 'jsdom';
@@ -385,6 +386,12 @@ export async function createDomHost({
     // Pick up the shims (matchMedia, observers) on the Node side too.
     mirrorWindow(window);
     installFetch(window, baseUrl, dom.cookieJar, intercept, log);
+
+    // The client uses browser-root-absolute imports (/script.js, /lib.js); map
+    // them onto public/ exactly as the server would serve them.
+    register('./browser-resolve-hook.mjs', import.meta.url, {
+        data: { publicDirUrl: pathToFileURL(publicDir).href },
+    });
 
     // Node owns module evaluation; jsdom cannot run <script type="module">.
     const appUrl = pathToFileURL(path.join(publicDir, 'script.js')).href;
