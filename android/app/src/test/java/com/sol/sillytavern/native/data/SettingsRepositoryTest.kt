@@ -151,6 +151,7 @@ class SettingsRepositoryTest {
         assertEquals("custom", postedOai["chat_completion_source"]!!.jsonPrimitive.content)
         assertEquals("https://api.example.com/v1", postedOai["custom_url"]!!.jsonPrimitive.content)
         assertEquals("my-model", postedOai["custom_model"]!!.jsonPrimitive.content)
+        assertEquals("the chat-completion backend must be selected", "openai", posted["main_api"]!!.jsonPrimitive.content)
 
         // reverse_proxy belongs to the official OpenAI provider, not to `custom`
         // (openai.js:2739-2749,2923); a custom save must leave it alone.
@@ -169,6 +170,18 @@ class SettingsRepositoryTest {
             postedOai["bias_presets"],
         )
         assertEquals(1, saveCalls)
+    }
+
+    @Test
+    fun saveSelectsTheChatCompletionBackend() = runBlocking {
+        // The shipped seed says main_api = "koboldhorde" (verified in
+        // SillyTavern/default/content/settings.json); the client dispatches on it,
+        // so selecting a provider without switching this routes every turn to the
+        // Horde and no API key is ever used.
+        repo.save(ProviderConfig(provider = ChatProvider.OPENAI, openAiModel = "gpt-4o"), apiKey = null)
+
+        val posted = json.parseToJsonElement(requireNotNull(savedBody)).jsonObject
+        assertEquals("openai", posted["main_api"]!!.jsonPrimitive.content)
     }
 
     @Test
@@ -310,6 +323,7 @@ class SettingsRepositoryTest {
               "firstRun": false,
               "username": "tester",
               "api_server": "http://127.0.0.1:8000",
+              "main_api": "koboldhorde",
               "unknown_top": {
                 "nested": [1, 2, {"deep": true}],
                 "empty": {},

@@ -66,9 +66,9 @@ class SettingsHttpException(val code: Int, val detail: String) :
  *  - `POST /api/settings/save` writes the request body wholesale to the file
  *    (`settings.js:207-216`). The repository therefore parses the raw string,
  *    patches only the fields of the selected provider (all of them live inside
- *    `oai_settings`), and posts the whole document back. Unknown top-level keys and
- *    unknown nested objects are preserved because the parsed map is copied, not
- *    rebuilt.
+ *    `oai_settings`) plus the top-level `main_api` that selects the chat backend,
+ *    and posts the whole document back. Unknown top-level keys and unknown nested
+ *    objects are preserved because the parsed map is copied, not rebuilt.
  *  - API keys never enter `settings.json`: they go to `POST /api/secrets/write`
  *    as `{ key, value, label }` (`secrets.js:511-526`). `/api/secrets/read` returns
  *    only ids/labels, so the stored value cannot be read back by this screen.
@@ -98,7 +98,7 @@ class SettingsRepository(private val engine: EngineClient) {
         // Read and parse before any write: a broken file must abort the whole
         // operation, not be silently replaced by a partial object.
         val root = readRoot()
-        val patched = patchOaiSettings(root, fieldsFor(config))
+        val patched = withMainApi(patchOaiSettings(root, fieldsFor(config)))
 
         val key = apiKey?.trim().orEmpty()
         if (key.isNotEmpty()) {
@@ -112,6 +112,22 @@ class SettingsRepository(private val engine: EngineClient) {
             )
         }
         post(PATH_SAVE, patched)
+    }
+
+    /**
+     * Selects the chat-completion backend at the top level.
+     *
+     * `main_api` is what `script.js` dispatches on (`main_api = settings.main_api`,
+     * `Generate()` branches on it); `chat_completion_source` only chooses the
+     * provider *inside* that backend. The shipped seed still says
+     * `main_api: "koboldhorde"` (`SillyTavern/default/content/settings.json`), so
+     * writing only `oai_settings` would leave every turn routed to the Horde and no
+     * key would ever be used. All three presets this form offers are chat
+     * completions, hence the unconditional value.
+     */
+    private fun withMainApi(root: JsonObject): JsonObject {
+        val merged = root.toMutableMap().apply { put("main_api", JsonPrimitive("openai")) }
+        return JsonObject(merged)
     }
 
     private suspend fun readRoot(): JsonObject {
