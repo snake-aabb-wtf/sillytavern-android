@@ -99,7 +99,7 @@ function tailLogs(logs, count = 60) {
  * Adds the handful of browser APIs jsdom leaves out. Everything here is inert:
  * it exists so the upstream UI code can finish initialising, not to render.
  */
-function installShims(window) {
+function installShims(window, log) {
     if (typeof window.matchMedia !== 'function') {
         window.matchMedia = query => ({
             matches: false,
@@ -141,6 +141,34 @@ function installShims(window) {
     ]) {
         if (!(name in window)) window[name] = class {};
     }
+
+    // jsdom ignores <script type="module">, so extension activation would wait
+    // forever for an onload that never fires. Fire it without executing the
+    // extension bundle: extensions only add optional UI here, and the parity
+    // capture shows they contribute nothing to the request body.
+    const appendChild = window.Node.prototype.appendChild;
+    const insertBefore = window.Node.prototype.insertBefore;
+    const isModuleScript = node => node
+        && node.nodeType === 1
+        && node.tagName === 'SCRIPT'
+        && String(node.getAttribute('type') || '').toLowerCase() === 'module';
+    const releaseModuleScript = node => {
+        const src = node.getAttribute('src') || '(inline)';
+        log(`[host] module script not executed by jsdom, releasing: ${src}`);
+        window.setTimeout(() => {
+            node.dispatchEvent(new window.Event('load'));
+        }, 0);
+    };
+    window.Node.prototype.appendChild = function (node) {
+        const result = appendChild.call(this, node);
+        if (isModuleScript(node)) releaseModuleScript(node);
+        return result;
+    };
+    window.Node.prototype.insertBefore = function (node, reference) {
+        const result = insertBefore.call(this, node, reference);
+        if (isModuleScript(node)) releaseModuleScript(node);
+        return result;
+    };
 
     if (window.navigator && !window.navigator.clipboard) {
         Object.defineProperty(window.navigator, 'clipboard', {
@@ -411,11 +439,27 @@ export async function createDomHost({
     readyTimeoutMs = 300_000,
 }) {
     const logs = [];
-    const log = line => {
-        const text = String(line);
+    let lastLine = null;
+    let repeated = 0;
+    const push = text => {
         logs.push(text);
         if (logs.length > LOG_LIMIT) logs.shift();
         onLog(text);
+    };
+    // Initialisation loops can emit the same warning thousands of times; keep
+    // the history readable without losing it.
+    const log = line => {
+        const text = String(line);
+        if (text === lastLine) {
+            repeated++;
+            return;
+        }
+        if (repeated > 0) {
+            push(`[repeated ${repeated} more times] ${lastLine}`);
+            repeated = 0;
+        }
+        lastLine = text;
+        push(text);
     };
 
     const indexPath = path.join(publicDir, 'index.html');
@@ -446,7 +490,7 @@ export async function createDomHost({
     log('[host] index.html loaded (classic scripts evaluated by jsdom)');
 
     installGlobals(window, log);
-    installShims(window);
+    installShims(window, log);
     // Pick up the shims (matchMedia, observers) on the Node side too.
     mirrorWindow(window);
     installFetch(window, baseUrl, dom.cookieJar, intercept, log);

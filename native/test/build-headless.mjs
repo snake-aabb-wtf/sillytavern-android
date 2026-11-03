@@ -110,11 +110,7 @@ function runBuilder(specPath) {
         });
         child.on('exit', code => {
             clearTimeout(timer);
-            if (code === 0) {
-                resolve({ stdout, stderr });
-                return;
-            }
-            reject(new Error(`Headless builder exited with ${code}\n--- stdout ---\n${stdout.slice(-3000)}\n--- stderr ---\n${stderr.slice(-20000)}`));
+            resolve({ code, stdout, stderr });
         });
     });
 }
@@ -140,10 +136,17 @@ async function buildCase(caseSpec) {
 
     const startedAt = Date.now();
     try {
-        const { stdout, stderr } = await runBuilder(specPath);
+        const { code, stdout, stderr } = await runBuilder(specPath);
         const elapsedMs = Date.now() - startedAt;
+        fs.writeFileSync(
+            out.replace(/\.json$/, '.log'),
+            `exit=${code}\n--- stdout ---\n${stdout}\n--- stderr ---\n${stderr}\n`,
+        );
+        if (code !== 0) {
+            process.stderr.write(`--- child stderr (tail) ---\n${stderr.slice(-12000)}\n`);
+            throw new Error(`Headless builder exited with ${code} (full log: ${out.replace(/\.json$/, '.log')})`);
+        }
         if (stdout.trim()) process.stdout.write(`  ${stdout.trim()}\n`);
-        fs.writeFileSync(out.replace(/\.json$/, '.log'), `--- stdout ---\n${stdout}\n--- stderr ---\n${stderr}\n`);
         if (stderr.trim() && process.env.HEADLESS_VERBOSE === '1') process.stderr.write(stderr);
         return { out, elapsedMs };
     } finally {
