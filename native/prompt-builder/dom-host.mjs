@@ -322,6 +322,27 @@ function installFetch(window, baseUrl, jar, intercept, log) {
     log('[host] fetch installed (Node fetch + jsdom cookie jar)');
 }
 
+
+/**
+ * Lists `<script type="module" src="...">` entries in document order. These
+ * are separate browser entry points, not a single graph rooted at script.js.
+ */
+function extractModuleEntryPoints(html) {
+    const entries = [];
+    const pattern = /<script\b[^>]*>/gi;
+    for (const match of html.matchAll(pattern)) {
+        const tag = match[0];
+        if (!/type\s*=\s*["']module["']/i.test(tag)) continue;
+        const src = /src\s*=\s*["']([^"']+)["']/i.exec(tag);
+        if (!src) continue;
+        entries.push(src[1].split('?')[0]);
+    }
+    if (!entries.includes('script.js') && !entries.includes('/script.js')) {
+        entries.push('script.js');
+    }
+    return entries;
+}
+
 function waitForCondition(predicate, { timeoutMs, label, logs }) {
     return new Promise((resolve, reject) => {
         const started = Date.now();
@@ -415,11 +436,20 @@ export async function createDomHost({
     });
 
     // Node owns module evaluation; jsdom cannot run <script type="module">.
-    const appUrl = pathToFileURL(path.join(publicDir, 'script.js')).href;
-    log(`[host] importing ${appUrl}`);
+    // The entries are imported in document order, exactly as a browser would
+    // evaluate them: several upstream modules deliberately rely on an earlier
+    // entry (for example scripts/i18n.js) breaking a circular import first.
+    const entryPointSrcs = extractModuleEntryPoints(html);
+    log(`[host] module entry points: ${entryPointSrcs.join(', ')}`);
     let app;
     try {
-        app = await import(appUrl);
+        for (const src of entryPointSrcs) {
+            const entryPath = path.join(publicDir, src.replace(/^\/+/, ''));
+            const entryUrl = pathToFileURL(entryPath).href;
+            log(`[host] importing ${entryUrl}`);
+            const namespace = await import(entryUrl);
+            if (src === 'script.js' || src === '/script.js') app = namespace;
+        }
     } catch (error) {
         throw new Error(
             `Failed to evaluate the SillyTavern module graph in jsdom: ${error?.stack || error}\n` +
