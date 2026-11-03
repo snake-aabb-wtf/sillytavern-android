@@ -389,6 +389,8 @@ export async function createDomHost({
 
     // The client uses browser-root-absolute imports (/script.js, /lib.js); map
     // them onto public/ exactly as the server would serve them.
+    // Shims for UMD packages need to require() from the SillyTavern install.
+    process.env.ST_REQUIRE_BASE = path.resolve(publicDir, '..', 'package.json');
     register('./browser-resolve-hook.mjs', import.meta.url, {
         data: { publicDirUrl: pathToFileURL(publicDir + path.sep).href },
     });
