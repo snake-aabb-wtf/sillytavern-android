@@ -622,15 +622,22 @@ export async function createDomHost({
     }, 15_000);
     heartbeat.unref?.();
 
-    // Same readiness signal the Playwright capture waits on.
+    // Readiness must not depend on the selected provider. This gate used to
+    // require `chat_completion_source === 'openai'`, which was only true while
+    // settings.json still held the default; a user who saves the built-in
+    // "OpenAI 兼容" (custom) or OpenRouter preset would never become ready and
+    // every chat turn would fail after the 300 s timeout. Any non-empty source is
+    // a valid ready state now.
     try {
         await waitFor(() => {
             const st = window.SillyTavern ?? globalThis.SillyTavern;
             if (!st?.getContext) return false;
             const ctx = st.getContext();
+            const source = ctx.chatCompletionSettings?.chat_completion_source;
             return Array.isArray(ctx.characters)
                 && ctx.characters.length > 0
-                && ctx.chatCompletionSettings?.chat_completion_source === 'openai';
+                && typeof source === 'string'
+                && source.length > 0;
         }, { label: 'window.SillyTavern context (characters + openai settings)' });
     } finally {
         clearInterval(heartbeat);

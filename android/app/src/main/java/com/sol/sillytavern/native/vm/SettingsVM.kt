@@ -99,6 +99,22 @@ class SettingsVM(private val repository: SettingsRepository) : ViewModel() {
         val current = _state.value as? SettingsUiState.Ready ?: return
         if (current.saving) return
 
+        // The web client refuses a custom URL that is not absolute before it ever
+        // posts, which would leave the native turn waiting on a request that is
+        // never built. Reject it here with a readable reason instead.
+        if (current.config.provider == ChatProvider.CUSTOM) {
+            val url = current.config.baseUrl.trim()
+            if (!url.startsWith("http://", ignoreCase = true) &&
+                !url.startsWith("https://", ignoreCase = true)
+            ) {
+                _state.value = current.copy(
+                    saved = false,
+                    error = "Base URL 必须以 http:// 或 https:// 开头",
+                )
+                return
+            }
+        }
+
         _state.value = current.copy(saving = true, saved = false, error = null)
         saveJob = viewModelScope.launch {
             try {
