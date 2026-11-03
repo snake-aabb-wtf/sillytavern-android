@@ -73,7 +73,7 @@ async function main() {
         assert.ok(token, 'could not obtain a CSRF token from the builder server');
 
         const request = async (relative, init = {}) => {
-            const response = await REAL_FETCH(url(relative), {
+            const send = () => REAL_FETCH(url(relative), {
                 ...init,
                 headers: {
                     cookie: jar.header(),
@@ -82,6 +82,16 @@ async function main() {
                     ...init.headers,
                 },
             });
+            let response;
+            try {
+                response = await send();
+            } catch (error) {
+                // Same stale keep-alive race as chat-state-isolation.mjs: the
+                // builder server may close an idle socket between turns.
+                const code = error?.cause?.code ?? error?.code;
+                trace(`retrying ${relative} after ${code ?? error?.message ?? error}`);
+                response = await send();
+            }
             jar.store(response);
             return response;
         };
