@@ -146,6 +146,37 @@ class ChatVMSendTest {
     }
 
     @Test
+    fun aStopDuringTheFinalSaveCannotDiscardTheCompletedReply() = runTest {
+        // `Done` makes the reply final, but the file is still being rewritten. A
+        // tap on 停止 in that window must not turn a complete turn into a stopped
+        // fragment: the stop-save would serialise behind this one, land second and
+        // rewrite the file without the reply that is already on screen.
+        val store = FakeStore(Chat(header, listOf(greeting)))
+        val gate = CompletableDeferred<Unit>()
+        store.onSave = { gate.await() }
+        val vm = doneVm(store, "Hello")
+
+        vm.send("Hi")
+
+        val saving = vm.state.value as ChatUiState.Ready
+        assertEquals(listOf("Hello there.", "Hi", "Hello"), saving.messages.map { it.text })
+        assertTrue("the reply is not final until the write returns", saving.streaming)
+
+        vm.stop()
+
+        gate.complete(Unit)
+
+        val after = vm.state.value as ChatUiState.Ready
+        assertFalse(after.streaming)
+        val last = after.messages.last()
+        assertEquals("Hello", last.text)
+        assertFalse("a completed reply must never be marked stopped", last.stopped)
+
+        assertEquals("the refused stop must not write a second time", 1, store.saves.size)
+        assertEquals(listOf("Hello there.", "Hi", "Hello"), store.saves.single().texts())
+    }
+
+    @Test
     fun stopCancelsAndSavesOnlyTheUserLine() = runTest {
         val store = FakeStore(Chat(header, listOf(greeting)))
         val gate = CompletableDeferred<Unit>()
