@@ -112,20 +112,30 @@ jobs:
           SIZE=$(stat -c %s "$SO")
           echo "libnode.so size: $SIZE bytes ($(du -h "$SO" | cut -f1))"
           test "$SIZE" -gt 41943040
-          grep -qE "['\"]v8_enable_i18n_support['\"]: 1" out/Release/config.gypi
-          grep -qE "['\"]icu_small['\"]: ['\"]?true" out/Release/config.gypi
-          grep -n 'i18n\|icu_small' out/Release/config.gypi
+          # configure writes config.gypi at the source root; out/Release is only a
+          # fallback for builds that copy it there.
+          CFG=config.gypi
+          [[ -f "$CFG" ]] || CFG=out/Release/config.gypi
+          [[ -f "$CFG" ]] || CFG=out/config.gypi
+          test -f "$CFG"
+          echo "config: $CFG"
+          grep -qE "['\"]v8_enable_i18n_support['\"]: 1" "$CFG"
+          grep -qE "['\"]icu_small['\"]: ['\"]?true" "$CFG"
+          grep -n 'i18n\|icu_small' "$CFG"
           # `strings | grep -q` can die of SIGPIPE under pipefail, so materialize it.
           strings -a "$SO" > "$RUNNER_TEMP/libnode.strings"
           grep -c 'icudt' "$RUNNER_TEMP/libnode.strings"
           grep -q 'icudt' "$RUNNER_TEMP/libnode.strings"
           grep -q 'Intl' "$RUNNER_TEMP/libnode.strings" || true
           cp "$SO" "$RUNNER_TEMP/libnode.so"
-          cp out/Release/config.gypi "$RUNNER_TEMP/config.gypi"
+          cp "$CFG" "$RUNNER_TEMP/config.gypi"
           readelf -d "$SO" | grep NEEDED || true
           file "$SO" || true
 
+      # `always()` so a failed assertion still leaves the .so for inspection;
+      # the Release step below is gated by the verification step.
       - name: Upload build artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: libnode-intl-arm64
@@ -133,7 +143,7 @@ jobs:
             ${{ runner.temp }}/libnode.so
             ${{ runner.temp }}/config.gypi
             ${{ runner.temp }}/build.log
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 30
 
       # Kept even when a build/verify step fails, so the failure is diagnosable
