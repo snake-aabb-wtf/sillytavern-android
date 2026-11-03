@@ -41,15 +41,27 @@
 
 ## 6. 方案选择
 
-已在对话中比较三条路线，用户选择 **② 换皮 + 拆掉网页资源**：
+### 6.1 界面层（已定）
 
 | 方案 | 做法 | 取舍 |
 | --- | --- | --- |
 | ① 换皮 | Compose UI + 保留完整运行时（含 `public/`） | 最稳，但白背 27 MB 无用前端 |
-| **② 换皮 + 去 public（选中）** | Compose UI + 保留 Node 引擎，运行时剔除 `public/` | 原生界面、体积略降、行为不变；扩展/提示词管理无 UI |
+| **② 换皮 + 去 public（选中）** | Compose UI + 保留 Node 引擎，运行时剔除 `public/` | 原生界面、体积略降；扩展/提示词管理无 UI |
 | ③ 重写引擎 | Kotlin 直连各家 API | 包小、秒开，但提示词/世界书/角色卡全部重写，以月计 |
 
-选 ② 的理由：用户明确只要原生界面、不在意安装包是否仍偏大；引擎不动可保证输出与现有版本一致；界面层与数据层分离后，将来若走 ③ 只替换数据层。
+### 6.2 提示词组装（评审后修正，关键）
+
+**修正前的错误判断**：原设计假设服务端负责组装提示词，客户端只发消息。核对源码后确认不成立——`src/endpoints/backends/chat-completions.js:2242` 的 `/generate` 只做来源分发与转发，`messages` 由调用方提供；角色卡、世界书激活、提示词管理器、上下文裁剪全部在 `public/scripts/openai.js`（7396 行，632 处 jQuery）与 `world-info.js`（6408 行）中。删掉 `public/` 等于删掉提示词引擎，模型只会收到裸聊天记录。
+
+| 方案 | 做法 | 取舍 |
+| --- | --- | --- |
+| **A. 组装搬到服务端（选中）** | 在 Node 内新增无头组装模块，复用现有 JS 逻辑，UI 只发「角色 + 会话 + 输入」 | 行为与现在一致，代码同一套；需剥离浏览器依赖，工作量中等 |
+| B. Kotlin 重写组装 | 客户端自行拼提示词 | 可彻底去掉 Node，但世界书/预设/分词重写以月计，输出必然漂移 |
+| C. 隐藏 WebView 组装 | 保留网页只做组装 | 工作量最小，但等于仍背整页网页代码跑，违背「彻底原生」 |
+
+选 A 的理由：唯一能同时满足「原生界面」与「输出不变」的路径，且复用现成逻辑，不引入第二套实现。
+
+**先验证再动手**：M0 试验（约 3 天）——挑三个角色（普通 / 带世界书 / 带预设覆盖），在 Node 内组装并导出请求体，与网页版同一会话的请求体逐字段比对。通过则继续；不通过则回到方案 B 重新评估。
 
 ## 7. 架构
 
@@ -63,7 +75,10 @@ Repository 层（CharacterRepository / ChatRepository / SettingsRepository）
 EngineClient（OkHttp + kotlinx.serialization）
         │  127.0.0.1:<port>，Cookie + x-csrf-token
         ▼
-Node 引擎（现有 ServerController / NodeService，不改）
+Node 引擎
+  ├── PromptBuilder（新，无头组装：角色卡 / 世界书 / 提示词管理器 / 裁剪）
+  ├── /api/native/chat（新，组装后流式转发）
+  └── 现有文件与设置接口（不改）
 ```
 
 - **EngineClient**：唯一持有 HTTP 的地方。启动时 `GET /csrf-token` 取令牌并保存 Cookie；写请求带 `x-csrf-token`；遇 403 刷新一次令牌重试。
@@ -76,6 +91,7 @@ Node 引擎（现有 ServerController / NodeService，不改）
 ```
 android/app/src/main/java/com/sol/sillytavern/
   engine/        EngineClient.kt, CsrfInterceptor.kt, SseReader.kt, EngineError.kt
+（服务端新增：src/native/prompt-builder.js、src/endpoints/native-chat.js）
   data/          model/, CharacterRepository.kt, ChatRepository.kt, SettingsRepository.kt
   native/ui/     App.kt, theme/, characters/, chats/, chat/, character/, settings/
   native/vm/     CharactersVM.kt, ChatsVM.kt, ChatVM.kt, CharacterEditVM.kt, ApiSettingsVM.kt
@@ -98,11 +114,14 @@ android/app/src/main/java/com/sol/sillytavern/
 | 存会话 | `POST /api/chats/save` | body `{avatar_url, file_name, chat, chat_metadata}` |
 | 改名/删除会话 | `POST /api/chats/rename` `/delete` | |
 | 设置读写 | `POST /api/settings/get` `/save` | 全量 JSON |
-| 生成 | `POST /api/backends/chat-completions/generate` | `stream: true` 时返回 SSE |
+| 生成（新） | `POST /api/native/chat` | body：`avatar_url`、`file_name`、`user_input`、`type`（send/regenerate/continue）、`options`；服务端组装后流式返回 |
+| 生成（底层，保留） | `POST /api/backends/chat-completions/generate` | 仅做来源分发与转发，`messages` 由调用方提供；原生 UI 不直接调用 |
 
 **流式契约**：响应为 `text/event-stream`，每行 `data: <json>`，JSON 为 OpenAI 风格 chunk；收到 `[DONE]` 结束。chunk 可能携带 `choices[0].delta.content`、推理内容、工具调用与图片。客户端只消费 `content` 与结束信号；遇到无法解析的字段跳过而非报错。
 
-**生成请求**：由服务端负责组装，客户端只发 `createGenerationParameters` 同构字段（`chat_completion_source`、`model`、`messages`、`max_tokens`、`temperature`、`stream` 等）。客户端**不自行拼系统提示**。
+**生成请求**：由新增的 `PromptBuilder` 在服务端组装，复用 `public/scripts` 中的角色卡、世界书、提示词管理器逻辑（无头环境垫片），组装结果直接送入现有 `/generate` 的转发路径。客户端**不自行拼任何提示词**，只提供会话标识与用户输入。
+
+**首版支持的来源**：OpenAI 兼容（含 OpenRouter，两者均为 OpenAI 风格 SSE）。Claude / Gemini 的流式结构不同，各自一个模块，放在后续里程碑。
 
 ## 9. 界面
 
@@ -134,11 +153,12 @@ android/app/src/main/java/com/sol/sillytavern/
 
 ## 12. 里程碑
 
-- **M1 骨架**：EngineClient + CSRF + 角色列表 + 会话列表 + 聊天只读 + 流式发送。
+- **M0 组装试验（先行门禁）**：Node 内无头组装三个样例角色，与网页版请求体逐字段比对；不通过则回退重估方案。
+- **M1 骨架**：`/api/native/chat` 跑通 + EngineClient + CSRF + 角色列表 + 会话列表 + 聊天只读 + 流式发送。
 - **M2 消息操作**：编辑、删除、重新生成、继续、停止、复制。
 - **M3 角色与设置**：角色新建/编辑/PNG 导入、API 设置与连接测试。
-- **M4 打包与验收**：剔除 `public/`、CI 出包、真机十项验收、更新文档与阅读材料。
-- **M5（可选）**：世界书、预设、群聊。
+- **M4 打包与验收**：剔除 `public/`、CI 出包、真机验收、更新文档。
+- **M5（可选）**：世界书编辑、预设编辑、群聊、Claude/Gemini 流式。
 
 每个里程碑独立 CI + 独立评审，不合并成一次性大提交。
 
@@ -168,7 +188,13 @@ android/app/src/main/java/com/sol/sillytavern/
 - Markdown：先做轻量自实现（粗体/斜体/代码/引用/列表/链接），不引入完整解析器。
 - 主题：Material3 动态取色（Android 12+），低版本用固定配色。
 
-## 16. 待用户确认
+## 16. 已确认与待确认
 
-1. 首版是否需要**群聊**入口？（当前列为非目标）
-2. 是否需要**世界书**的只读浏览（不做编辑），以便排查角色行为？
+已确认（用户答复）：
+
+1. 纯原生，网页界面不再出现；走「换皮 + 去 public」。
+2. 日常使用 OpenAI 兼容与 OpenRouter —— 首版只做 OpenAI 风格 SSE，两者共用同一解析器。
+
+待用户确认：
+
+1. 是否同意先做 M0 组装试验（约 3 天）再进入界面开发。
