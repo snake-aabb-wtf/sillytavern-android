@@ -192,19 +192,10 @@ cp -- "$LIB_JS" "$SERVER_DIR/public/lib.bundle.js"
 # public/ cannot be dropped: the native client's headless prompt builder loads
 # the real web client from it (index.html, script.js and the whole scripts/
 # module graph, plus locales/ and lib/). Only the assets a browser would paint
-# are safe to remove - jsdom never reads fonts, images, stylesheets or sounds,
-# and no native screen requests them. Keep the list below in sync with the
-# parity gate (native/test/build-headless.mjs with NATIVE_SERVER_DIR).
+# are safe to remove. The parity workflow prunes a copy with the same script,
+# so a needed asset hidden in one of these directories fails CI.
 printf '==> Pruning browser-only assets from public/ (fonts, images, CSS, sounds, icons)\n'
-PUBLIC_DIR="$SERVER_DIR/public"
-[[ -f "$PUBLIC_DIR/index.html" ]] || die "public/index.html is missing before pruning"
-[[ -s "$PUBLIC_DIR/lib.bundle.js" ]] || die "public/lib.bundle.js is empty before pruning"
-rm -rf -- "$PUBLIC_DIR/webfonts" "$PUBLIC_DIR/img" "$PUBLIC_DIR/css" "$PUBLIC_DIR/sounds"
-rm -f -- "$PUBLIC_DIR/style.css" "$PUBLIC_DIR/favicon.ico" "$PUBLIC_DIR"/*.ico
-for kept in index.html script.js scripts lib locales; do
-    [[ -e "$PUBLIC_DIR/$kept" ]] || die "public/$kept disappeared during pruning"
-done
-[[ -s "$PUBLIC_DIR/lib.bundle.js" ]] || die "public/lib.bundle.js disappeared during pruning"
+"$ROOT/scripts/prune-public.sh" --require-bundle "$SERVER_DIR"
 
 [[ -d "$TMP_DATA/default-user" ]] || die "default content was not seeded into <dataRoot>/default-user"
 [[ -s "$TMP_DATA/default-user/settings.json" ]] || die "seeded default-user/settings.json is missing"

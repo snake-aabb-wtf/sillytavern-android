@@ -54,6 +54,23 @@ jobs:
         working-directory: native
         run: npm run test:headless
 
+      # The step above runs against the unpruned checkout. Re-run the fixtures
+      # against a copy pruned by the same script staging uses, so an asset that
+      # jsdom actually needs cannot hide in webfonts/img/css/sounds and ship.
+      - name: Re-run the fixtures against a pruned tree
+        working-directory: native
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d)"
+          copy="$work/SillyTavern"
+          cp -a ../SillyTavern "$copy"
+          ../scripts/prune-public.sh "$copy"
+          if [[ -d "$copy/public/css" ]]; then
+            echo "::error::prune-public.sh left public/css in the copy"
+            exit 1
+          fi
+          NATIVE_SERVER_DIR="$copy" node test/build-headless.mjs
+
       - name: Upload captures
         if: always()
         uses: actions/upload-artifact@v4

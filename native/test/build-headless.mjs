@@ -19,11 +19,27 @@ import { CASES, CHAT_FILE, USER_INPUT, FIXTURES_DIR, getFreePort, prepareDataRoo
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, '../..');
 // NATIVE_SERVER_DIR points the harness at a copy of the server tree (for
-// example one pruned the way stage-runtime.sh prunes it) without touching the
-// upstream SillyTavern/ checkout.
-const SERVER_DIR = process.env.NATIVE_SERVER_DIR
-    ? path.resolve(process.env.NATIVE_SERVER_DIR)
-    : path.join(REPO_ROOT, 'SillyTavern');
+// example one pruned by scripts/prune-public.sh) without touching the upstream
+// SillyTavern/ checkout. An empty value is a configuration error, not a
+// fallback: a PASS must always name the tree it ran against.
+const rawServerDir = process.env.NATIVE_SERVER_DIR;
+if (rawServerDir !== undefined && !rawServerDir.trim()) {
+    throw new Error('NATIVE_SERVER_DIR is set but empty; unset it or point it at a server tree');
+}
+const SERVER_DIR = rawServerDir ? path.resolve(rawServerDir) : path.join(REPO_ROOT, 'SillyTavern');
+const SERVER_STAT = fs.statSync(SERVER_DIR, { throwIfNoEntry: false });
+if (!SERVER_STAT?.isDirectory()) {
+    throw new Error(`server tree does not exist or is not a directory: ${SERVER_DIR}`);
+}
+// An override is expected to be the pruned copy the gate builds. Accepting an
+// unpruned override would make a pruned PASS and an unpruned PASS look alike.
+if (rawServerDir !== undefined && fs.existsSync(path.join(SERVER_DIR, 'public', 'css'))) {
+    throw new Error(
+        `NATIVE_SERVER_DIR is not pruned (public/css exists): ${SERVER_DIR}; ` +
+        'run scripts/prune-public.sh on the copy',
+    );
+}
+process.stdout.write(`headless: using server tree ${SERVER_DIR}\n`);
 const BUILDER_CLI = path.join(REPO_ROOT, 'native/prompt-builder/index.mjs');
 const REFERENCE_DIR = path.join(REPO_ROOT, 'fixtures/reference');
 const HEADLESS_DIR = path.join(REPO_ROOT, 'fixtures/headless');
