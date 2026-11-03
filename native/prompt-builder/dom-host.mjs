@@ -139,7 +139,9 @@ function installShims(window, log) {
         'CSSImportRule', 'CSSFontFaceRule', 'CSSPageRule', 'CSSNamespaceRule',
         'CSSConditionRule', 'CSSGroupingRule',
     ]) {
-        if (!(name in window)) window[name] = class {};
+        // jsdom exposes some of these as present-but-undefined, which breaks
+        // `x instanceof CSSSupportsRule` with "RHS is not an object".
+        if (typeof window[name] !== 'function') window[name] = class {};
     }
 
     // jsdom ignores <script type="module">, so extension activation would wait
@@ -243,6 +245,27 @@ function installShims(window, log) {
  * Installs jsdom's window as the process-wide browser global, mirroring the
  * browser's `window === globalThis` assumption as far as Node allows.
  */
+const DOM_CONSTRUCTOR_PATTERN = /^(?:HTML|SVG|MathML|DOM|CSS|Document|Window|Node|Element|Event|Mouse|Keyboard|Input|Focus|UI|Pointer|Touch|Wheel|Drag|Submit|Clipboard|FormData|File|Blob|Image|Audio|Option|Text|Comment|Range|Selection|XPath|Mutation|Resize|Intersection)/;
+
+/**
+ * Copies every DOM interface constructor jsdom knows about onto globalThis.
+ * The client uses DOMPurify hooks and many `instanceof` checks, so an
+ * incomplete list of HTML*Element classes breaks rendering.
+ */
+function installDomConstructors(window, log) {
+    for (const key of Object.getOwnPropertyNames(window)) {
+        if (!DOM_CONSTRUCTOR_PATTERN.test(key)) continue;
+        if (key in globalThis) continue;
+        try {
+            const value = window[key];
+            if (typeof value !== 'function') continue;
+            Object.defineProperty(globalThis, key, { value, writable: true, configurable: true });
+        } catch (error) {
+            log(`[host] could not install DOM constructor ${key}: ${error?.message || error}`);
+        }
+    }
+}
+
 function installGlobals(window, log) {
     globalThis.window = window;
     for (const key of FORCED_GLOBALS) {
@@ -260,6 +283,7 @@ function installGlobals(window, log) {
         }
     }
     mirrorWindow(window);
+    installDomConstructors(window, log);
 }
 
 /**
@@ -491,8 +515,9 @@ export async function createDomHost({
 
     installGlobals(window, log);
     installShims(window, log);
-    // Pick up the shims (matchMedia, observers) on the Node side too.
+    // Pick up the shims (matchMedia, observers, CSSOM rules) on the Node side too.
     mirrorWindow(window);
+    installDomConstructors(window, log);
     installFetch(window, baseUrl, dom.cookieJar, intercept, log);
 
     // The client uses browser-root-absolute imports (/script.js, /lib.js); map
