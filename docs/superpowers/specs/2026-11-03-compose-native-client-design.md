@@ -63,6 +63,17 @@
 
 **先验证再动手**：M0 试验（约 3 天）——挑三个角色（普通 / 带世界书 / 带预设覆盖），在 Node 内组装并导出请求体，与网页版同一会话的请求体逐字段比对。通过则继续；不通过则回到方案 B 重新评估。
 
+**M0 结果（2026-11-03，结论：通过）**
+
+- 环境：GitHub Actions `ubuntu-latest` + Node 20。同一 job 内先用 Playwright 录制真实网页的 `/generate` 请求体，再在 jsdom 里用同一份角色卡、会话与 `settings.json` 重放并逐字段比对。
+- 用例：`character-plain`（普通）、`character-worldinfo`（世界书条目被激活）、`preset-override`（`temp_openai=0.42`、`top_p_openai=0.85`）。
+- 结果：3/3 的 `body` **深度相等**，无差异字段；因此对拍白名单为空（`IGNORED_PATHS = []`），没有"忽略未知字段"这种放水。
+- 做法：jsdom 只承担 DOM（`index.html`、jQuery、toastr、polyfill）；`script.js` 及其模块图由 Node 直接求值（jsdom 不支持 `<script type="module">`），页面 `fetch` 换成 Node fetch 并共享 jsdom 的 cookie jar，`/generate` 请求被拦截取出 body。`public/` 未做任何修改。
+- 耗时：单例端到端 135–139 s（含启动真实 server 与客户端初始化），其中 `build()` 本身 19.4 / 21.0 / 20.3 s；三例合计 411 s。
+- 证据：CI run `41618846320`（`Native parity` job 全绿），产物 `generate-bodies` 同时含 `fixtures/reference` 与 `fixtures/headless`。
+
+结论：方案 A 的可行性门禁通过，按 M1 继续。
+
 ## 7. 架构
 
 ```

@@ -238,7 +238,6 @@ export async function createBuilder({ dataDir, port, serverDir = DEFAULT_SERVER_
             throw new Error(`build(): unsupported type ${JSON.stringify(type)}; only "normal" is implemented`);
         }
 
-        const context = ctx();
         await host.waitFor(() => Array.isArray(ctx().characters) && ctx().characters.length > 0, {
             timeoutMs: 60_000,
             label: 'characters to load',

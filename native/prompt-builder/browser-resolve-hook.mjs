@@ -37,9 +37,3 @@ export async function resolve(specifier, context, nextResolve) {
 
     return nextResolve(specifier, context);
 }
-
-export async function load(url, context, nextLoad) {
-    // Nothing to customise today; the hook exists so future upstream quirks can
-    // be handled without touching the SillyTavern subtree.
-    return nextLoad(url, context);
-}

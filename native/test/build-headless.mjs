@@ -34,7 +34,6 @@ const CHILD_TIMEOUT_MS = 15 * 60_000;
 const IGNORED_PATHS = new Set([]);
 
 const readJson = file => JSON.parse(fs.readFileSync(file, 'utf8'));
-const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 function describe(value) {
     if (value === undefined) return '<missing>';
@@ -203,7 +202,6 @@ async function main() {
         return;
     }
     process.stdout.write(`RESULT: PASS (${CASES.length}/${CASES.length})\n`);
-    await delay(1);
 }
 
 main().catch(error => {
