@@ -1,0 +1,218 @@
+name: Android
+
+# Push builds are artifact-only; tags st-sol-* additionally publish a Release.
+# The APK is the deliverable, so every push to the working branches must produce
+# one. No secrets are needed: the debug keystore is committed, headers come from a
+# public npm tarball, and libnode.so is a public Release asset built by
+# libnode-intl.yml.
+
+on:
+  push:
+    branches:
+      - feature/android-shell
+      - main
+    tags:
+      - 'st-sol-*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  NODEJS_MOBILE_VERSION: 18.20.4
+  # ICU-enabled libnode.so (see libnode-intl.yml). The npm package build uses
+  # --with-intl=none, so `\p{...}` regexes and Intl fail at runtime.
+  LIBNODE_TAG: libnode-intl-18.20.4
+  # versionCode keeps each build installable over the previous one. versionName is
+  # derived below: the tag for tag builds, "1.0.<run_number>" for branch pushes.
+  VERSION_CODE: ${{ github.run_number }}
+
+jobs:
+  build:
+    name: Build debug APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # A tag build must report the release version (st-sol-1.0.2 -> 1.0.2); a branch
+      # build keeps the monotonic "1.0.<run_number>" scheme.
+      - name: Compute version name
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+            VERSION_NAME="${TAG#st-sol-}"
+          else
+            VERSION_NAME="1.0.${GITHUB_RUN_NUMBER}"
+          fi
+          echo "VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
+          echo "versionName=$VERSION_NAME"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # Node 20 is only needed for the webpack build inside stage-runtime.sh;
+      # the runtime itself is smoked on Node 18 (the libnode ABI).
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Verify SillyTavern patches
+        run: bash scripts/verify-patches.sh
+
+      - name: Cache npm
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-npm-${{ hashFiles('SillyTavern/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-npm-
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('android/**/*.gradle*', 'android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      # Keyed by the libnode release tag so a rebuilt .so is never masked by an
+      # old cache entry.
+      - name: Cache libnode
+        uses: actions/cache@v4
+        with:
+          path: android/nodejs-mobile/libnode
+          key: ${{ runner.os }}-libnode-intl-${{ env.LIBNODE_TAG }}
+
+      # CMake expects android/nodejs-mobile/libnode/{include/node, bin/<abi>/libnode.so}.
+      # Headers come from the npm package (identical either way); the .so comes from
+      # the ICU-enabled Release built by libnode-intl.yml.
+      #
+      # Fallback: the npm package's libnode.so is built with --with-intl=none, which
+      # breaks `\p{...}` regexes ("Invalid property name") and removes Intl. Do not
+      # fall back to it silently.
+      - name: Fetch libnode
+        run: |
+          set -euo pipefail
+          LIBNODE_DIR=android/nodejs-mobile/libnode
+          SO="$LIBNODE_DIR/bin/arm64-v8a/libnode.so"
+          if [[ -f "$LIBNODE_DIR/include/node/node.h" && -s "$SO" ]]; then
+            strings -a "$SO" > /tmp/libnode-cache.strings
+            if grep -q icudt /tmp/libnode-cache.strings; then
+              echo "ICU libnode already present (cache hit)"
+              exit 0
+            fi
+            echo "cached libnode lacks ICU data; refetching"
+            rm -f "$SO"
+          fi
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          curl -fsSL --retry 3 -o "$tmp/njm.tgz" \
+            "https://registry.npmjs.org/nodejs-mobile-react-native/-/nodejs-mobile-react-native-${NODEJS_MOBILE_VERSION}.tgz"
+          tar -C "$tmp" -xzf "$tmp/njm.tgz"
+          mkdir -p "$LIBNODE_DIR/bin/arm64-v8a"
+          cp -a "$tmp/package/android/libnode/include" "$LIBNODE_DIR/"
+          curl -fSL --retry 3 -o "$SO" \
+            "https://github.com/${GITHUB_REPOSITORY}/releases/download/${LIBNODE_TAG}/libnode.so"
+          test -s "$LIBNODE_DIR/include/node/node.h"
+          test -s "$SO"
+          test "$(stat -c %s "$SO")" -gt 41943040
+          strings -a "$SO" > "$tmp/strings.txt"
+          grep -q icudt "$tmp/strings.txt"
+          grep -q 'Intl' "$tmp/strings.txt"
+          echo "libnode.so: $(du -h "$SO" | cut -f1) (ICU data present)"
+
+      # Produces dist/runtime/{server,seed} and dist/runtime.zip (5-15 min).
+      - name: Stage runtime
+        run: bash scripts/stage-runtime.sh
+
+      # The packaged runtime is keyed by the asset's content hash, so a changed zip is
+      # always unpacked on upgrade instead of silently reusing filesDir/runtime/dev.
+      - name: Compute runtime version
+        run: |
+          set -euo pipefail
+          RUNTIME_VERSION="$(sha256sum dist/runtime.zip | cut -d' ' -f1 | cut -c1-12)"
+          echo "RUNTIME_VERSION=$RUNTIME_VERSION" >> "$GITHUB_ENV"
+          echo "RUNTIME_VERSION=$RUNTIME_VERSION"
+
+      - name: Set up Node 18.20.4
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18.20.4'
+
+      # Exercises the shipped zip, not the pre-zip build tree.
+      - name: Smoke runtime on Node 18
+        run: |
+          set -euo pipefail
+          node -v
+          NODE18="$(command -v node)" bash scripts/smoke-node18.sh dist/runtime.zip
+
+      - name: Copy runtime into assets
+        run: |
+          set -euo pipefail
+          cp dist/runtime.zip android/app/src/main/assets/runtime.zip
+          ls -lh android/app/src/main/assets/runtime.zip
+
+      - name: Run unit tests
+        working-directory: android
+        run: ./gradlew testDebugUnitTest --no-daemon --stacktrace
+
+      - name: Build debug APK
+        working-directory: android
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Assert APK package
+        run: |
+          set -euo pipefail
+          APK=android/app/build/outputs/apk/debug/app-debug.apk
+          test -s "$APK"
+          BUILD_TOOLS="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n 1)"
+          "$BUILD_TOOLS/aapt" dump badging "$APK" > /tmp/badging.txt
+          grep -q "package: name='com.sol.sillytavern'" /tmp/badging.txt
+          grep -q "sdkVersion:'26'" /tmp/badging.txt
+          grep -q "native-code: 'arm64-v8a'" /tmp/badging.txt
+          grep -q "versionName='${VERSION_NAME}'" /tmp/badging.txt
+          ls -lh "$APK"
+          unzip -l "$APK" | grep -q 'lib/arm64-v8a/libnode.so'
+          unzip -l "$APK" | grep -q 'lib/arm64-v8a/libstbridge.so'
+          unzip -l "$APK" | grep -q 'assets/runtime.zip'
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/st-sol-')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download APK
+        uses: actions/download-artifact@v4
+        with:
+          name: app-debug-apk
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: app-debug.apk
+          fail_on_unmatched_files: true
+          generate_release_notes: true

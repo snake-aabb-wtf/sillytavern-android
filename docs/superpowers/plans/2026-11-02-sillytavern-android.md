@@ -228,7 +228,7 @@ keytool -genkeypair -v -keystore android/keystore/debug.keystore \
 
 - [ ] **Step 2: 配置 `build.gradle.kts`**
 
-`applicationId "com.sol.sillytavern"`；`versionCode = (System.getenv("VERSION_CODE") ?: "1000").toInt()`；`versionName "1.0.$versionCode"`；`signingConfigs.debug` 指向上面的 keystore；`abiFilters += "arm64-v8a"`；`buildConfigField("String","RUNTIME_VERSION", "\"${System.getenv("RUNTIME_VERSION") ?: "dev"}\"")`。
+`applicationId "com.sol.sillytavern"`；`versionCode = (System.getenv("VERSION_CODE") ?: "1000").toInt()`；`versionName` 取 `VERSION_NAME`（CI：tag 构建为 tag 版本号，分支构建为 `"1.0.<run_number>"`；本地回退 `"1.0.<versionCode>"`）；`signingConfigs.debug` 指向上面的 keystore；`abiFilters += "arm64-v8a"`；`buildConfigField("String","RUNTIME_VERSION", "\"${System.getenv("RUNTIME_VERSION") ?: "dev"}\"")`。
 
 - [ ] **Step 3: 最小 Manifest**
 
@@ -451,7 +451,7 @@ SAF 取消、写入失败都要 Toast，不静默。
 
 - [ ] **Step 1: 工作流**
 
-步骤：checkout → setup-java 17 → setup-node 20 → 下载 nodejs-mobile 包并解出 libnode → `bash scripts/stage-runtime.sh` → `bash scripts/smoke-node18.sh dist/runtime` → 复制 `runtime.zip` 到 assets → `./gradlew assembleDebug` → `aapt dump badging` 断言包名 → 上传 artifact。
+步骤：checkout → setup-java 17 → setup-node 20 → `bash scripts/verify-patches.sh`（行为断言）→ 下载 nodejs-mobile 包并解出 libnode → `bash scripts/stage-runtime.sh` → 计算 `RUNTIME_VERSION`（`dist/runtime.zip` sha256 前 12 位）→ **setup-node 18.20.4**（冒烟必须用 libnode 的 ABI 版本）→ `NODE18="$(command -v node)" bash scripts/smoke-node18.sh dist/runtime.zip` → 复制 `runtime.zip` 到 assets → `./gradlew testDebugUnitTest` → `./gradlew assembleDebug` → `aapt dump badging` 断言包名与 `versionName` → 上传 artifact。
 
 - [ ] **Step 2: 缓存**
 
@@ -461,9 +461,9 @@ SAF 取消、写入失败都要 Toast，不静默。
 
 Run: GitHub Actions 页面确认 `Build` 成功、APK 可下载。
 
-- [ ] **Step 4: 发 Release**
+- [ ] **Step 4: 发 Release（推送 tag 自动完成）**
 
-`gh release create st-sol-1.0.<run> --notes ... app-debug.apk`（用现有令牌 helper）。
+打 tag `st-sol-1.0.<x>` 并 `git push origin st-sol-1.0.<x>`：workflow 的 `Publish Release` job 自动把 `app-debug.apk` 附到 GitHub Release 并生成 notes。本机未安装 `gh`，查看/删除请用 GitHub API 或 Releases 页面。
 
 - [ ] **Step 5: 提交**
 

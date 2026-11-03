@@ -3,8 +3,10 @@ android/build/
 android/app/build/
 android/local.properties
 android/nodejs-mobile/
+android/app/src/main/assets/runtime.zip
 SillyTavern/node_modules/
 SillyTavern/dist/
+dist/
 *.iml
 .idea/
 HANDOFF.md

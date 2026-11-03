@@ -351,7 +351,12 @@ async function preSetupTasks() {
     initRequestProxy({ enabled: cliArgs.requestProxyEnabled, url: cliArgs.requestProxyUrl, bypass: cliArgs.requestProxyBypass, enableKeepAlive: cliArgs.enableKeepAlive, privateRequestFilterEnabled: requestFilterOptions.enabled });
 
     // Wait for frontend libs to compile
-    await webpackMiddleware.runWebpackCompiler({ pruneCache: true });
+    // ST-ANDROID: prebuilt frontend libs are shipped in the app, skip the webpack compile
+    if (process.env.ST_SKIP_WEBPACK === '1') { // ST-ANDROID
+        console.log('[ST-ANDROID] using prebuilt frontend libraries'); // ST-ANDROID
+    } else { // ST-ANDROID
+        await webpackMiddleware.runWebpackCompiler({ pruneCache: true }); // ST-ANDROID
+    } // ST-ANDROID
 }
 
 /**
