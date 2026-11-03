@@ -69,8 +69,8 @@
 - 用例：`character-plain`（普通）、`character-worldinfo`（世界书条目被激活）、`preset-override`（`temp_openai=0.42`、`top_p_openai=0.85`）。
 - 结果：3/3 的 `body` **深度相等**，无差异字段；因此对拍白名单为空（`IGNORED_PATHS = []`），没有"忽略未知字段"这种放水。
 - 做法：jsdom 只承担 DOM（`index.html`、jQuery、toastr、polyfill）；`script.js` 及其模块图由 Node 直接求值（jsdom 不支持 `<script type="module">`），页面 `fetch` 换成 Node fetch 并共享 jsdom 的 cookie jar，`/generate` 请求被拦截取出 body。`public/` 未做任何修改。
-- 耗时：单例端到端 135–139 s（含启动真实 server 与客户端初始化），其中 `build()` 本身 19.4 / 21.0 / 20.3 s；三例合计 411 s。
-- 证据：CI run `41618846320`（`Native parity` job 全绿），产物 `generate-bodies` 同时含 `fixtures/reference` 与 `fixtures/headless`。
+- 耗时：单例端到端 129–144 s（含启动真实 server 与客户端初始化），其中 `build()` 本身 22.1 / 21.5 / 21.0 s；三例合计 404 s。
+- 证据：CI run `41620737840`（`Native parity` job 全绿），产物 `generate-bodies` 同时含 `fixtures/reference` 与 `fixtures/headless`。
 
 结论：方案 A 的可行性门禁通过，按 M1 继续。
 
