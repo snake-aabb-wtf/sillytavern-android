@@ -85,10 +85,17 @@ class WebBridge(
 
     /**
      * Reported by the page when the blob itself is already over the cap, so the user gets a
-     * Toast instead of a silently cancelled click. No token: this only shows a message.
+     * Toast instead of a silently cancelled click.
+     *
+     * Carries the same session token as [saveBlob]: although it only surfaces a message,
+     * an untokened method lets any embedded frame drive UI state.
      */
     @JavascriptInterface
-    fun reportTooLarge(name: String, bytes: Long) {
+    fun reportTooLarge(name: String, bytes: Long, callerToken: String) {
+        if (!tokenMatches(callerToken)) {
+            Log.w(TAG, "rejected too-large report without the bridge token")
+            return
+        }
         Log.w(TAG, "export too large: $name ($bytes bytes)")
         reject(Rejection.TOO_LARGE)
     }

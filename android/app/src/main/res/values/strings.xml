@@ -72,6 +72,7 @@
     <string name="log_export_cancelled">已取消导出</string>
 
     <string name="import_apply_failed_format">导入数据应用失败：%1$s</string>
+    <string name="import_needs_restart">导入已暂存：服务仍在运行，请重启应用后完成导入</string>
 
     <string name="backup_error_unknown">未知错误</string>
     <string name="backup_error_internal">内部错误（%1$s）</string>

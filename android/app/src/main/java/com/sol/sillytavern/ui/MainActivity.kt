@@ -179,9 +179,10 @@ class MainActivity : ComponentActivity() {
     /**
      * Restores a staged import before Node starts, then boots the server.
      *
-     * A live Node keeps file handles inside `data/`, so a swap is only safe before the
-     * first start (or after a failed attempt). On activity recreation while the server is
-     * up the marker is left for the next cold start instead.
+     * A live Node keeps file handles inside `data/`, so a swap is only safe when no Node
+     * thread is alive (cold start). On activity recreation while the server is up, or when
+     * a failed attempt left a live thread behind, the marker is left for the next cold
+     * start instead.
      */
     private fun applyPendingImportThenStart() {
         val state = ServerController.state.value
@@ -192,6 +193,14 @@ class MainActivity : ComponentActivity() {
             state is ServerState.Starting ||
             state is ServerState.Ready
         ) {
+            startServer()
+            return
+        }
+        // Failed is not proof that Node is gone: a readiness timeout fails the state while
+        // the thread is still alive. Renaming data/ under it would leave the server writing
+        // into the detached directory, so keep the marker for the next cold start.
+        if (!ServerController.canSafelyRewriteData()) {
+            Toast.makeText(this, R.string.import_needs_restart, Toast.LENGTH_LONG).show()
             startServer()
             return
         }

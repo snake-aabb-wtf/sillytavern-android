@@ -90,7 +90,7 @@
     function reportTooLarge(name, size) {
         console.warn('[STBridge] export exceeds 64 MB, dropped');
         if (typeof bridge.reportTooLarge === 'function') {
-            bridge.reportTooLarge(name, size);
+            bridge.reportTooLarge(name, size, token);
         }
     }
 

@@ -62,6 +62,12 @@ object ServerController {
     private const val CONFIG_NAME = "config.yaml"
     private const val DATA_DIR_NAME = "data"
 
+    /** Shown when a retry cannot start Node again in this process. */
+    private const val NODE_EXITED_RESTART_REQUIRED = "Node 已退出，请重启应用"
+
+    /** node.log is rotated once it passes this size; the previous log is kept as .1. */
+    private const val MAX_LOG_BYTES = 2L * 1024 * 1024
+
     private const val CONNECT_TIMEOUT_MS = 1_000
     private const val READ_TIMEOUT_MS = 1_000
     private const val POLL_INTERVAL_MS = 250L
@@ -101,6 +107,14 @@ object ServerController {
     @Volatile
     private var nodePort: Int = -1
 
+    /**
+     * True once `node::Start()` has been entered in this process. libnode is single-shot:
+     * a second call aborts natively, so this latch never goes back to false, not even
+     * when the thread exits or [stop] clears [nodeThread].
+     */
+    @Volatile
+    private var nodeStartedInProcess = false
+
     private val _state = MutableStateFlow<ServerState>(ServerState.Idle)
     val state: StateFlow<ServerState> = _state.asStateFlow()
 
@@ -110,8 +124,8 @@ object ServerController {
      *
      * If an earlier attempt timed out but its Node thread is still alive, a retry only
      * re-enters [awaitReady] on that thread's port. `node::Start()` must never run twice
-     * concurrently in one process, so a fresh Node is started only once the old thread
-     * has exited.
+     * in one process: libnode can only be initialised once, so once the Node thread has
+     * exited a retry reports that a restart is required instead of starting it again.
      */
     @Synchronized
     fun start(context: Context) {
@@ -120,6 +134,12 @@ object ServerController {
             ServerState.Idle, is ServerState.Failed -> Unit
         }
         val appContext = context.applicationContext
+
+        if (nodeStartedInProcess && nodeThread == null) {
+            val logPath = File(appContext.filesDir, LOG_RELATIVE_PATH).absolutePath
+            _state.value = ServerState.Failed(NODE_EXITED_RESTART_REQUIRED, logPath)
+            return
+        }
 
         val liveThread = nodeThread
         val livePort = nodePort
@@ -154,6 +174,16 @@ object ServerController {
         nodeThread = null
         nodePort = -1
     }
+
+    /**
+     * True when no Node thread is alive, i.e. `data/` may be renamed without detaching the
+     * directory a running server still writes into.
+     *
+     * [ServerState.Failed] alone is not enough: a readiness timeout fails the state while
+     * the Node thread keeps running and may still come up.
+     */
+    @Synchronized
+    fun canSafelyRewriteData(): Boolean = nodeThread?.isAlive != true
 
     /**
      * Polls `http://127.0.0.1:[port]/` until it answers 2xx/3xx, at most [timeoutMs].
@@ -269,6 +299,8 @@ object ServerController {
             return
         }
 
+        rotateLogIfNeeded(logFile)
+
         val fd = try {
             logFile.parentFile?.mkdirs()
             ParcelFileDescriptor.open(
@@ -319,6 +351,7 @@ object ServerController {
         }
         try {
             thread.start()
+            nodeStartedInProcess = true
         } catch (t: Throwable) {
             forgetNode(thread)
             closeFd(fd)
@@ -391,6 +424,27 @@ object ServerController {
         if (!temp.renameTo(file)) {
             temp.delete()
             throw IOException("cannot rename ${temp.path} to ${file.path}")
+        }
+    }
+
+    /**
+     * Renames an oversized node.log to node.log.1 (replacing the previous rotation) before
+     * the fd is opened. Append mode means an unrotated log grows without bound.
+     */
+    private fun rotateLogIfNeeded(logFile: File) {
+        try {
+            if (!logFile.isFile || logFile.length() <= MAX_LOG_BYTES) return
+            val parent = logFile.parentFile ?: return
+            val rotated = File(parent, "${logFile.name}.1")
+            rotated.delete()
+            if (logFile.renameTo(rotated)) {
+                Log.i(TAG, "rotated ${logFile.name} (${rotated.length()} bytes) to ${rotated.name}")
+            } else {
+                Log.w(TAG, "failed to rotate ${logFile.path}")
+            }
+        } catch (e: Exception) {
+            // Rotation is housekeeping: never block startup on it.
+            Log.w(TAG, "failed to rotate ${logFile.path}", e)
         }
     }
 
