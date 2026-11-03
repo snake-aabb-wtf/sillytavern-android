@@ -188,10 +188,21 @@ class MainActivity : ComponentActivity() {
                     composedPort = state.port
                     val port = state.port
                     composeHost.setContent {
-                        SolTheme { SolApp(port) }
+                        SolTheme {
+                            SolApp(
+                                port = port,
+                                // The splash stays up until the new tree has drawn a
+                                // frame; hiding it on Ready alone reveals an unpainted
+                                // ComposeView (white flash, then the character grid).
+                                onFirstFrame = { splashOverlay.visibility = View.GONE },
+                            )
+                        }
                     }
+                } else {
+                    // Already composed (Ready after a failed retry): there is no new
+                    // first frame to wait for.
+                    splashOverlay.visibility = View.GONE
                 }
-                splashOverlay.visibility = View.GONE
             }
             is ServerState.Failed -> {
                 lastFailureLogPath = state.logPath

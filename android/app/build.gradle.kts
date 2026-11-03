@@ -103,6 +103,10 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
+    // Coil 2.7 is built on the same OkHttp 4.12 line as the engine client, so the
+    // avatar thumbnail requests share the platform's TLS/cleartext policy without a
+    // second networking stack.
+    implementation("io.coil-kt:coil-compose:2.7.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
     // OkHttp 4.12.0 is the last 4.x line: it still ships the Android-friendly API the
@@ -112,4 +116,6 @@ dependencies {
     // JVM-only unit tests drive the engine client against a real HTTP socket;
     // MockWebServer needs no Android runtime, unlike Robolectric.
     testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
+    // setMain() lets the view model tests run the real viewModelScope on the JVM.
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
 }
