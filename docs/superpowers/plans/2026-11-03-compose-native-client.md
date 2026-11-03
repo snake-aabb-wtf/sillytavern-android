@@ -159,6 +159,48 @@ git commit -m "feat: add /api/native/chat streaming endpoint"
 
 ---
 
+### Task 3b: 把每条消息的准备时间压到 3 秒内
+
+**Files:**
+- Modify: `native/prompt-builder/index.mjs`
+- Modify: `native/prompt-builder/dom-host.mjs`
+- Modify: `native/endpoints/native-chat.mjs`
+- Modify: `native/test/latency-probe.mjs`（或同名 CI 探针）
+- Test: `native/test/chat-state-isolation.mjs`（保持绿色）
+
+**Interfaces:**
+- Consumes: `Builder.build({ avatarUrl, fileName, userInput, type })`（Task 2）、`/api/native/chat`（Task 3）。
+- Produces: 不变的路由契约；warm 首字节 ≤ 3000 ms（CI 探针断言）。
+
+**背景：** 当前 warm 首字节 6.3–23.5 s，主要耗在「每次 turn 重新 `POST /api/chats/get` + `printMessages()` 渲染整段历史」与页面主线程的 jsdom 开销。这个数字不可接受，且可能影响 `/api/native/chat` 的形态，因此在做界面前解决。
+
+- [ ] **Step 1: 先量再改**
+
+在 `build()` 内按阶段打点（page ready / chat load / render / set input / click / capture），跑 `native/test/latency-probe.mjs` 记录一次三段式耗时。把数字写进报告，后续每步对照。
+
+- [ ] **Step 2: 跳过整页渲染**
+
+不要走 `reloadCurrentChat()`。改为直接 `GET /api/chats/get`（或读该 `fileName` 的聊天文件）拿到 JSON，写入 `ctx().chat` 与 `characters[i].chat`，再触发发送。断言：三份 parity 夹具的 `body` 仍逐字段相等；两轮隔离测试仍绿。
+
+- [ ] **Step 3: 页面常驻 + 启动预热**
+
+服务启动时异步预热 jsdom 页面（现有 warm-up 保留），并把「角色选择 / 设置加载」从每次 `build()` 移到首次构建时缓存。
+
+- [ ] **Step 4: 主线程让位**
+
+若 `build()` 仍阻塞 HTTP 事件循环，把 builder 放进 `node:worker_threads`，路由通过消息通道取 `{url, body}`；SSE 转发仍在主线程。断言：构建期间健康检查接口仍能在 200 ms 内响应。
+
+- [ ] **Step 5: 门禁**
+
+`latency-probe` 增加硬断言：warm 首字节 ≤ 3000 ms，超过即 CI 失败（附阶段耗时）。若最终仍 > 3000 ms，报告实测分布与瓶颈，不得把断言放宽。
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add native
+git commit -m "perf: cut warm prompt-build latency to the interactive budget"
+```
+
 ### Task 4: Android 接入 Compose 与依赖
 
 **Files:**
