@@ -52,6 +52,8 @@ jobs:
 
       - name: Build the same requests headlessly (jsdom) and diff
         working-directory: native
+        env:
+          HEADLESS_VERBOSE: '1'
         run: npm run test:headless
 
       - name: Upload captures

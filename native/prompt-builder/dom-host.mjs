@@ -66,6 +66,7 @@ const FORCED_GLOBALS = [
     'Selection',
     'DOMRect',
     'Audio',
+    'console',
     'matchMedia',
     'ResizeObserver',
     'IntersectionObserver',
