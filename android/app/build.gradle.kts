@@ -4,6 +4,10 @@ plugins {
 }
 
 val versionCodeEnv = (System.getenv("VERSION_CODE") ?: "1000").toInt()
+// CI sets VERSION_NAME ("1.0.<run_number>" for branch builds, the tag for releases);
+// the fallback keeps local builds installable.
+val versionNameEnv = System.getenv("VERSION_NAME")?.takeIf { it.isNotBlank() }
+    ?: "1.0.$versionCodeEnv"
 val runtimeVersion = System.getenv("RUNTIME_VERSION") ?: "dev"
 
 android {
@@ -16,7 +20,7 @@ android {
         minSdk = 26
         targetSdk = 35
         versionCode = versionCodeEnv
-        versionName = "1.0.$versionCodeEnv"
+        versionName = versionNameEnv
 
         ndk {
             abiFilters += "arm64-v8a"

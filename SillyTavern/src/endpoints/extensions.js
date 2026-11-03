@@ -400,6 +400,8 @@ router.post('/move', async (request, response) => {
  */
 router.post('/version', async (request, response) => {
     try {
+        if (blockOnMobile(response)) return; // ST-ANDROID
+
         if (typeof request.body.extensionName !== 'string') {
             return response.status(400).send('Bad Request: A valid extensionName is required in the request body.');
         }
