@@ -18,7 +18,12 @@ import { CASES, CHAT_FILE, USER_INPUT, FIXTURES_DIR, getFreePort, prepareDataRoo
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, '../..');
-const SERVER_DIR = path.join(REPO_ROOT, 'SillyTavern');
+// NATIVE_SERVER_DIR points the harness at a copy of the server tree (for
+// example one pruned the way stage-runtime.sh prunes it) without touching the
+// upstream SillyTavern/ checkout.
+const SERVER_DIR = process.env.NATIVE_SERVER_DIR
+    ? path.resolve(process.env.NATIVE_SERVER_DIR)
+    : path.join(REPO_ROOT, 'SillyTavern');
 const BUILDER_CLI = path.join(REPO_ROOT, 'native/prompt-builder/index.mjs');
 const REFERENCE_DIR = path.join(REPO_ROOT, 'fixtures/reference');
 const HEADLESS_DIR = path.join(REPO_ROOT, 'fixtures/headless');
