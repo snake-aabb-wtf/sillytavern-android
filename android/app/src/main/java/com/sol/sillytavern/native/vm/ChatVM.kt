@@ -16,12 +16,16 @@ import java.time.Instant
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -101,6 +105,14 @@ class ChatVM(
     private var loadJob: Job? = null
     private var turnJob: Job? = null
 
+    /**
+     * Serialises writes. The stop/failure save and a completed turn's save can be
+     * requested from different jobs; the mutex plus [persistLatest]'s snapshot of
+     * the current state means the last writer always writes the newest transcript,
+     * never an older snapshot over a newer one.
+     */
+    private val saveLock = Mutex()
+
     init {
         refresh()
     }
@@ -117,7 +129,6 @@ class ChatVM(
         val current = _state.value as? ChatUiState.Ready ?: return
         if (current.streaming) return
 
-        turnJob?.cancel()
         val withUser = current.messages +
             ChatLine(
                 text = input,
@@ -148,6 +159,11 @@ class ChatVM(
             }
         }
         _state.value = current.copy(messages = messages, streaming = false)
+
+        // The user's line already exists and must survive the screen; the stopped
+        // fragment is filtered out by [persisted]. This runs in its own job because
+        // stop() must return immediately.
+        viewModelScope.launch { reportSaveFailure(persistLatest()) }
     }
 
     internal suspend fun load() {
@@ -229,7 +245,12 @@ class ChatVM(
         }
     }
 
-    /** Persists the completed turn once; the header is carried through untouched. */
+    /**
+     * Persists the completed turn once; the header is carried through untouched.
+     *
+     * `streaming` stays true across the write so the composer cannot start a new
+     * turn (and cancel this job) while the file is being rewritten.
+     */
     private suspend fun finishReply(text: String) {
         val current = _state.value as? ChatUiState.Ready ?: return
         val messages = current.messages.toMutableList()
@@ -240,18 +261,13 @@ class ChatVM(
             stopped = false,
             raw = messageRaw(text, isUser = false, name = messages[index].name),
         )
-        _state.value = current.copy(messages = messages, streaming = false)
+        _state.value = current.copy(messages = messages)
 
-        try {
-            store.save(Chat(header ?: newHeader(), messages.persisted()))
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (error: Throwable) {
-            appendLine(ChatLine(text = "保存失败: ${failureText(error)}", isUser = false, error = true))
-        }
+        reportSaveFailure(persistLatest())
+        finishStreaming()
     }
 
-    private fun failTurn(message: String, partial: String) {
+    private suspend fun failTurn(message: String, partial: String) {
         val current = _state.value as? ChatUiState.Ready ?: return
         val messages = current.messages.toMutableList()
         val last = messages.lastOrNull()
@@ -264,7 +280,11 @@ class ChatVM(
         }
         // An error is a UI notice, not a chat message: [persisted] filters it out.
         messages += ChatLine(text = message, isUser = false, error = true)
-        _state.value = current.copy(messages = messages, streaming = false)
+        _state.value = current.copy(messages = messages)
+
+        // The user's line is real even though the reply is not; persist it alone.
+        reportSaveFailure(persistLatest())
+        finishStreaming()
     }
 
     private fun replaceLastAssistant(line: ChatLine) {
@@ -284,6 +304,47 @@ class ChatVM(
     private fun assistantName(): String =
         characterName.ifBlank { (_state.value as? ChatUiState.Ready)?.title.orEmpty() }
 
+    /**
+     * Writes the newest transcript under one lock. Returns the failure text when
+     * the write failed, null on success. The save is [NonCancellable]: leaving the
+     * screen must not leave a half-written chat file behind.
+     */
+    private suspend fun persistLatest(): String? = saveLock.withLock {
+        val ready = _state.value as? ChatUiState.Ready ?: return@withLock null
+        try {
+            withContext(NonCancellable) {
+                store.save(Chat(currentHeader(), ready.messages.persisted()))
+            }
+            null
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Throwable) {
+            failureText(error)
+        }
+    }
+
+    private fun reportSaveFailure(error: String?) {
+        if (error != null) {
+            appendLine(ChatLine(text = "保存失败: $error", isUser = false, error = true))
+        }
+    }
+
+    private fun finishStreaming() {
+        val ready = _state.value as? ChatUiState.Ready ?: return
+        _state.value = ready.copy(streaming = false)
+    }
+
+    /**
+     * The header from disk, or a freshly constructed one for a chat that does not
+     * exist yet. An empty object is never written back: it would permanently
+     * disable the server's integrity check for the file.
+     */
+    private fun currentHeader(): JsonObject {
+        val existing = header
+        if (!existing.isNullOrEmpty()) return existing
+        return newHeader().also { header = it }
+    }
+
     private fun fileTitle(): String = file.substringAfterLast('/').removeSuffix(CHAT_EXTENSION)
 
     /**
@@ -293,7 +354,14 @@ class ChatVM(
      */
     private fun List<ChatLine>.persisted(): List<ChatMessage> = mapNotNull { line ->
         when {
-            line.error || line.text.isBlank() -> null
+            // A notice, never a message.
+            line.error -> null
+            // A cancelled turn's fragment is display-only; it is not history.
+            line.stopped -> null
+            // Only a never-loaded line may be dropped for being blank. A loaded
+            // line with `mes: ""` is real (attachments live in extra.media) and
+            // deleting it would silently destroy the file.
+            line.raw == null && line.text.isBlank() -> null
             line.raw != null -> ChatMessage(line.raw)
             else -> ChatMessage(messageRaw(line.text, line.isUser, line.name))
         }

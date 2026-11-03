@@ -251,17 +251,19 @@ class EngineClient(baseUrl: String, client: OkHttpClient = OkHttpClient()) {
      *
      * A JSON body carries the server's `error` field, so it is read and parsed
      * as a whole (up to [MAX_JSON_ERROR_BYTES]); truncating it to 200 bytes
-     * would destroy the cause. Only a non-JSON body falls back to the short
-     * diagnostic snippet the brief specifies.
+     * would destroy the cause. The status code is kept in front of the server's
+     * text as well: `prompt build failed: ...` on its own reads like a client
+     * bug, and the brief requires the code to be visible in the chat.
      */
     private fun failureMessage(response: Response): String {
         val contentType = response.header("Content-Type").orEmpty()
         val jsonBody = contentType.contains("json", ignoreCase = true)
         val snippet = readBounded(response, if (jsonBody) MAX_JSON_ERROR_BYTES else MAX_TEXT_ERROR_BYTES)
         return if (jsonBody) {
-            runCatching {
+            val detail = runCatching {
                 json.parseToJsonElement(snippet).jsonObject["error"]?.jsonPrimitive?.contentOrNull
-            }.getOrNull()?.takeIf { it.isNotBlank() } ?: "HTTP ${response.code}"
+            }.getOrNull()?.takeIf { it.isNotBlank() }
+            if (detail == null) "HTTP ${response.code}" else "HTTP ${response.code}: $detail"
         } else {
             val text = snippet.trim()
             if (text.isEmpty()) "HTTP ${response.code}" else "HTTP ${response.code}: $text"

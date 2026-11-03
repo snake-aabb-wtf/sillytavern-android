@@ -159,15 +159,17 @@ class MainActivity : ComponentActivity() {
 
     /**
      * targetSdk 35 enforces edge-to-edge on Android 15: pad the root (and therefore the
-     * splash/error overlays) by the system bars, cutout and IME insets so the content stays
-     * fully reachable.
+     * splash/error overlays) by the system bars and cutout so the content stays reachable.
+     *
+     * The IME inset is deliberately not applied here. The Compose chat screen pads its
+     * composer with `imePadding()`; padding the root as well would lift the composer a
+     * second keyboard-height above the keyboard. No other screen hosts a text field.
      */
     private fun applyWindowInsets() {
         ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
             val bars = insets.getInsets(
                 WindowInsetsCompat.Type.systemBars() or
-                    WindowInsetsCompat.Type.displayCutout() or
-                    WindowInsetsCompat.Type.ime(),
+                    WindowInsetsCompat.Type.displayCutout(),
             )
             view.setPadding(bars.left, bars.top, bars.right, bars.bottom)
             insets
