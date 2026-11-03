@@ -457,6 +457,90 @@ git commit -m "docs: native client status and acceptance"
 
 ---
 
+### Task 11: 连接设置（OpenAI 兼容 / OpenRouter）
+
+**背景（Ruling R10）：** 原生客户端没有网页界面可退，而默认数据里没有可用的 API 配置——全新安装打开就只能看见角色列表，发不出话。所以「配置提供商」是 M1 的一部分，不能推给后续里程碑。
+
+**Files:**
+- Create: `android/app/src/main/java/com/sol/sillytavern/native/data/SettingsRepository.kt`
+- Create: `android/app/src/main/java/com/sol/sillytavern/native/ui/settings/SettingsScreen.kt`
+- Create: `android/app/src/main/java/com/sol/sillytavern/native/vm/SettingsVM.kt`
+- Create: `android/app/src/test/java/com/sol/sillytavern/native/data/SettingsRepositoryTest.kt`
+- Modify: `android/app/src/main/java/com/sol/sillytavern/native/ui/App.kt`（`settings` 路由 + 入口图标）
+
+**Interfaces（已核对源码）：**
+- `POST /api/settings/get` 返回 `{ settings: "<settings.json 的原始字符串>", ...预设列表 }`（`SillyTavern/src/endpoints/settings.js:219-268`）。
+- `POST /api/settings/save` 把请求体整体写入 `settings.json`（`settings.js:207-216`）——**客户端必须先解析、只改已知字段、再整体回写**，否则会丢掉不认识的键。
+- `POST /api/secrets/write`，body `{ key, value, label }`（`secrets.js:511-526`）；键名 `api_key_openrouter`、`api_key_custom`、`api_key_openai`。
+- 相关字段：`chat_completion_source`（`openai` / `openrouter` / `custom`）、`reverse_proxy`（自定义端点的 base URL）、`custom_model`、`openai_model`。
+
+- [ ] **Step 1: 写失败的保真测试**
+
+`SettingsRepositoryTest`：给一份含未知键与嵌套对象的 `settings.json`，只改 `chat_completion_source` 与 `reverse_proxy`，断言回写体里**未知键逐个保留、其余值不变**。RED 后再实现。
+
+- [ ] **Step 2: 实现仓库**
+
+读取 → 解析字符串 → 只 patch 指定字段 → 回写；密钥走 `/api/secrets/write`，不落进 `settings.json`。读取时如果 `settings` 不是合法 JSON，抛错而不是重建空对象（否则一次保存就会清空用户配置）。
+
+- [ ] **Step 3: 设置界面**
+
+三项预设：OpenAI 兼容（自定义 base URL + 模型名）、OpenRouter（模型名）、OpenAI 官方；对应填 `chat_completion_source`、`reverse_proxy`、`custom_model`/`openai_model` 与密钥键。密钥输入框为密码样式，保存后只显示「已保存」，不回显明文。保存成功给一次可见反馈；失败显示可读错误。
+
+- [ ] **Step 4: 入口**
+
+角色列表顶栏加一个齿轮/设置入口，路由 `settings`；返回不丢列表状态。
+
+- [ ] **Step 5: CI 与提交**
+
+Run: `testDebugUnitTest` + `assembleDebug`。
+Expected: 全绿；测试证明未知键保真。
+
+```bash
+git add android/app/src/main/java/com/sol/sillytavern/native/data/SettingsRepository.kt \
+        android/app/src/main/java/com/sol/sillytavern/native/ui/settings \
+        android/app/src/main/java/com/sol/sillytavern/native/vm/SettingsVM.kt \
+        android/app/src/main/java/com/sol/sillytavern/native/ui/App.kt \
+        android/app/src/test/java/com/sol/sillytavern/native/data/SettingsRepositoryTest.kt
+git commit -m "feat(android): provider settings without the web UI"
+```
+
+---
+
+### Task 12: 新建会话
+
+**Files:**
+- Modify: `android/app/src/main/java/com/sol/sillytavern/native/vm/ChatsVM.kt`
+- Modify: `android/app/src/main/java/com/sol/sillytavern/native/ui/chats/ChatsScreen.kt`
+- Create: `android/app/src/main/java/com/sol/sillytavern/native/data/NewChat.kt`
+- Create: `android/app/src/test/java/com/sol/sillytavern/native/data/NewChatTest.kt`
+
+**Interfaces:**
+- 用角色的 `first_mes`（取不到时用 `alternate_greetings[0]`）生成首条消息；头部用 Task 8 的 `newHeader()` 形状（`user_name`、`character_name`、`create_date`、`chat_metadata.integrity`）。
+- 文件名沿用服务端习惯：`<角色名> - YYYY-MM-DD@HHhMMmSSs.jsonl`，冲突时加序号。
+
+- [ ] **Step 1: 写失败的测试**
+
+`NewChatTest`：给定角色（含 `first_mes`）与当前时间，断言生成的文件名格式、头部字段齐全、且首条消息的 `mes` 等于 `first_mes`、`is_user=false`。
+
+- [ ] **Step 2: 实现并接进会话列表**
+
+会话列表加「新建会话」按钮：调用 `ChatRepository.save` 写入新文件后直接进入 `chat/{avatar}/{file}`。`ChatFormatException` 不适用（新文件），但保存失败要显示可读错误，不要静默返回。
+
+- [ ] **Step 3: CI 与提交**
+
+Run: `testDebugUnitTest` + `assembleDebug`。
+Expected: 全绿。
+
+```bash
+git add android/app/src/main/java/com/sol/sillytavern/native/data/NewChat.kt \
+        android/app/src/main/java/com/sol/sillytavern/native/vm/ChatsVM.kt \
+        android/app/src/main/java/com/sol/sillytavern/native/ui/chats/ChatsScreen.kt \
+        android/app/src/test/java/com/sol/sillytavern/native/data/NewChatTest.kt
+git commit -m "feat(android): start a new chat from the character"
+```
+
+---
+
 ## 后续计划（不在本计划内）
 
 M2 消息操作（编辑/删除/重发/继续/复制）、M3 角色编辑与 API 设置、M5 世界书与预设，待 M1 落地后各自单独出计划；M0 若不通过，整条路线回退到方案 B 重新评估。
