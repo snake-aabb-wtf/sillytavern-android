@@ -16,7 +16,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { chromium } from 'playwright';
 import { write as writeCharacterCard } from '../../SillyTavern/src/character-card-parser.js';
@@ -24,12 +24,12 @@ import { write as writeCharacterCard } from '../../SillyTavern/src/character-car
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, '../..');
 const SERVER_DIR = path.join(REPO_ROOT, 'SillyTavern');
-const FIXTURES_DIR = path.join(REPO_ROOT, '.github/ci/fixtures');
+export const FIXTURES_DIR = path.join(REPO_ROOT, '.github/ci/fixtures');
 const OUTPUT_DIR = path.join(REPO_ROOT, 'fixtures/reference');
 
-const USER_INPUT = 'Are apples always red?';
-const CHAT_FILE = 'fixture-chat';
-const MODEL = 'gpt-4o-mini';
+export const USER_INPUT = 'Are apples always red?';
+export const CHAT_FILE = 'fixture-chat';
+export const MODEL = 'gpt-4o-mini';
 const SSE_BODY = 'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n';
 
 // 1x1 transparent PNG. The character card parser only needs a valid PNG to
@@ -43,7 +43,7 @@ const BASE_PNG = Buffer.from(
  * Fixture matrix. `_variant` records the non-default settings a capture used so
  * Task 2 can reproduce the same request.
  */
-const CASES = [
+export const CASES = [
     {
         name: 'character-plain',
         card: 'character-plain.json',
@@ -70,7 +70,7 @@ const CASES = [
 const readJson = file => JSON.parse(fs.readFileSync(file, 'utf8'));
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-async function getFreePort() {
+export async function getFreePort() {
     const server = net.createServer();
     await new Promise((resolve, reject) => {
         server.once('error', reject);
@@ -139,7 +139,7 @@ function writeChatFile(chatPath, card, messages) {
  * Creates a data root laid out like a normal SillyTavern install and copies in
  * the fixture character, lore, chat, settings and a placeholder API key.
  */
-function prepareDataRoot(caseSpec) {
+export function prepareDataRoot(caseSpec) {
     const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), `st-capture-${caseSpec.name}-`));
     const dataRoot = path.join(tmpRoot, 'data');
     const userRoot = path.join(dataRoot, 'default-user');
@@ -394,7 +394,14 @@ async function main() {
     console.log(`reference captures written to ${OUTPUT_DIR}`);
 }
 
-main().catch(error => {
-    console.error(error);
-    process.exitCode = 1;
-});
+// Exported helpers are reused by build-headless.mjs; only run the capture when
+// this file is executed directly.
+const invokedDirectly = process.argv[1]
+    && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url;
+
+if (invokedDirectly) {
+    main().catch(error => {
+        console.error(error);
+        process.exitCode = 1;
+    });
+}

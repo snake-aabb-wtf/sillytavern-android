@@ -8,6 +8,7 @@ SillyTavern/node_modules/
 SillyTavern/dist/
 native/node_modules/
 fixtures/reference/
+fixtures/headless/
 dist/
 *.iml
 .idea/

@@ -1,8 +1,10 @@
 name: Native parity
 
-# Task 1 of the native-client plan: capture the real web UI's /generate bodies.
-# SillyTavern's dependencies and the Playwright browser cannot be installed on
-# the 1.9 GB build host, so this workflow is the required environment.
+# M0 gate for the native client. One job captures the real web UI's /generate
+# bodies, then reproduces them headlessly in jsdom and diffs the two field by
+# field. SillyTavern's dependencies and the Playwright browser cannot be
+# installed on the 1.9 GB build host, so this workflow is the required
+# environment.
 on:
   push:
     branches:
@@ -17,10 +19,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  capture:
-    name: Capture reference /generate bodies
+  parity:
+    name: Capture reference and compare headless build
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -44,14 +46,21 @@ jobs:
         working-directory: native
         run: npx playwright install --with-deps chromium
 
-      - name: Capture reference requests
+      - name: Capture reference requests (browser)
         working-directory: native
         run: npm run capture:reference
 
-      - name: Upload reference captures
+      - name: Build the same requests headlessly (jsdom) and diff
+        working-directory: native
+        run: npm run test:headless
+
+      - name: Upload captures
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: reference-generate-bodies
-          path: fixtures/reference
+          name: generate-bodies
+          path: |
+            fixtures/reference
+            fixtures/headless
           if-no-files-found: error
           retention-days: 14
