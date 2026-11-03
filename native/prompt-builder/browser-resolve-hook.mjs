@@ -17,7 +17,8 @@ export function initialize(data) {
 
 export async function resolve(specifier, context, nextResolve) {
     if (publicDirUrl && specifier.startsWith('/') && !specifier.startsWith('//')) {
-        const mapped = new URL(`.${specifier}`, publicDirUrl).href;
+        const base = publicDirUrl.endsWith('/') ? publicDirUrl : `${publicDirUrl}/`;
+        const mapped = new URL(`.${specifier}`, base).href;
         return nextResolve(mapped, context);
     }
     return nextResolve(specifier, context);

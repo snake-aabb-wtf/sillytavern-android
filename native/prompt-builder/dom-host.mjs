@@ -390,7 +390,7 @@ export async function createDomHost({
     // The client uses browser-root-absolute imports (/script.js, /lib.js); map
     // them onto public/ exactly as the server would serve them.
     register('./browser-resolve-hook.mjs', import.meta.url, {
-        data: { publicDirUrl: pathToFileURL(publicDir).href },
+        data: { publicDirUrl: pathToFileURL(publicDir + path.sep).href },
     });
 
     // Node owns module evaluation; jsdom cannot run <script type="module">.
