@@ -16,12 +16,11 @@ import org.junit.runner.Description
  * suspension, which is what makes the assertions right after the constructor
  * deterministic for the non-suspending fakes used here.
  */
+@OptIn(ExperimentalCoroutinesApi::class)
 class MainDispatcherRule(
     private val dispatcher: TestDispatcher = UnconfinedTestDispatcher(),
 ) : TestWatcher() {
-    @OptIn(ExperimentalCoroutinesApi::class)
     override fun starting(description: Description) = Dispatchers.setMain(dispatcher)
 
-    @OptIn(ExperimentalCoroutinesApi::class)
     override fun finished(description: Description) = Dispatchers.resetMain()
 }
