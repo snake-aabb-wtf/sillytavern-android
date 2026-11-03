@@ -97,9 +97,19 @@ jobs:
 
       # Finding 1: build() must not leak the canned SSE reply into the chat or
       # write it to disk, or the next prompt replays "ok" as real history.
+      # Runs even when the latency gate above is red: a flaky 3 s sample must
+      # not hide a chat-integration regression.
       - name: Assert chat state survives two builds unchanged
+        if: always()
         working-directory: native
         run: node test/chat-state-isolation.mjs
+
+      # Turn 1 now adopts the character without getChatResult(), so this guards
+      # the state it establishes: this_chid (world info) and name2 ({{char}}).
+      - name: Assert the character lorebook survives two turns
+        if: always()
+        working-directory: native
+        run: node test/world-info-turns.mjs
 
   # Proves the shipped artifact, not just the sources: stage-runtime.sh applies
   # the native/ overlay to dist/runtime/server and appends the mount to the

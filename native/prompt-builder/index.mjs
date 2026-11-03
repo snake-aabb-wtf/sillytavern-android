@@ -445,21 +445,43 @@ export async function createBuilder({ dataDir, port, serverDir = DEFAULT_SERVER_
             throw new Error(`Character not found: ${avatarUrl} (have: ${characters.map(c => c.avatar).join(', ')})`);
         }
 
-        const alreadySelected = String(ctx().characterId) === String(index);
-        const character = characters[index];
+        let character = characters[index];
         character.chat = fileName;
 
-        if (alreadySelected) {
-            // Cached selection: select_selected_character() rewrites the whole
-            // character editor (~40 jQuery writes) and schedules a settings
-            // save, none of which reaches the prompt. Skip it.
+        // Both the first and later turns use loadChatState(). Turn 1 used to go
+        // through selectCharacterById(), whose getChat() -> getChatResult() runs
+        // clearChat(), printMessages() and select_selected_character(); none of
+        // that reaches the /generate body, and it kept parity (which builds
+        // once, in a fresh process) testing the old path rather than this one.
+        //
+        // The state getChatResult() establishes around the chat load has to be
+        // replicated explicitly: unshallowCharacter() hydrates a shallow card,
+        // setCharacterId() points getCurrentChatId()/world info at this chat,
+        // and setCharacterName() sets `name2`, which is what {{char}} and the
+        // chat-completion name resolve to. Leaving `name2` at the persona name
+        // silently corrupts the prompt.
+        const app = host.app ?? {};
+        const canAdoptDirectly =
+            typeof app.setCharacterId === 'function' &&
+            typeof app.setCharacterName === 'function';
+
+        if (canAdoptDirectly) {
+            if (String(ctx().characterId) !== String(index)) {
+                if (typeof app.unshallowCharacter === 'function') {
+                    await app.unshallowCharacter(index);
+                    // getOneCharacter() replaces the array entry with the full card.
+                    character = ctx().characters[index];
+                    character.chat = fileName;
+                }
+                app.setCharacterId(index);
+                app.setCharacterName(character.name);
+            }
             mark('select');
-            // selectCharacterById only re-reads the chat when the selected
-            // character changes (script.js:889-908). This builder is memoised
-            // for the whole server lifetime, so without an explicit reload
-            // turn 2 would reuse the restored in-memory array and silently drop
-            // anything persisted between turns (a real assistant reply saved by
-            // the caller).
+
+            // This builder is memoised for the whole server lifetime, so each
+            // turn must re-read the chat: the caller saves the real assistant
+            // reply between turns and the restored in-memory array would
+            // silently drop it.
             const loaded = await loadChatState({ character, index, fileName });
             if (!loaded) {
                 // Empty chat: the real path materialises the greeting; keep it
@@ -472,9 +494,8 @@ export async function createBuilder({ dataDir, port, serverDir = DEFAULT_SERVER_
             }
             mark('chat');
         } else {
-            // A real character switch goes through the client, because only it
-            // owns this_chid. That path loads the chat via getChat() (first
-            // turn only; later turns take the branch above).
+            // A client without the exported setters still works, it just pays
+            // for the render: getChat() leaves the same state behind.
             await ctx().selectCharacterById(index, { switchMenu: false });
             lastChatKey = `${index}:${fileName}`;
             lastChatManifest = normalizeManifest(ctx().chatMetadata);

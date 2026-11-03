@@ -30,7 +30,10 @@ const CHUNKS = [
     'data: {"choices":[{"delta":{"content":"apples"}}]}\n\n',
     'data: [DONE]\n\n',
 ];
-const REQUESTS = Number(process.env.LATENCY_REQUESTS ?? 4);
+// Request 1 pays the cold build; the R5 gate uses the warm requests after it.
+// Five warm samples and a median: three samples left the decision sitting on a
+// single runner hiccup, 11% under a 3000 ms budget.
+const REQUESTS = Number(process.env.LATENCY_REQUESTS ?? 6);
 const BUDGET_MS = 3000;
 const HEALTH_BUDGET_MS = 200;
 const WATCHDOG_MS = Number(process.env.LATENCY_WATCHDOG_MS ?? 600_000);
@@ -226,7 +229,7 @@ async function main() {
     const healthMax = healthSamples.length > 0 ? Math.max(...healthSamples) : null;
     const warmPhases = buildPhases.slice(1);
 
-    console.log(`[latency] cold_builder_ms=${coldMs} first_request_first_byte_ms=${firstBytes[0] ?? 'n/a'} warm_median_first_byte_ms=${warmMedian ?? 'n/a'} requests=${firstBytes.length} failures=${failures}`);
+    console.log(`[latency] cold_builder_ms=${coldMs} first_request_first_byte_ms=${firstBytes[0] ?? 'n/a'} warm_median_first_byte_ms=${warmMedian ?? 'n/a'} warm_samples=${warm.length} requests=${firstBytes.length} failures=${failures}`);
     console.log(`[latency] health samples=${healthSamples.length} p95_ms=${healthP95 ?? 'n/a'} max_ms=${healthMax ?? 'n/a'} budget_ms=${HEALTH_BUDGET_MS}`);
 
     if (failures > 0) process.exitCode = 1;

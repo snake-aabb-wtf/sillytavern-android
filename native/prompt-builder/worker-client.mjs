@@ -10,11 +10,24 @@ import { Worker } from 'node:worker_threads';
 const DEFAULT_READY_TIMEOUT_MS = 300_000;
 
 /**
+ * Typed failure for "the worker is gone / cannot start". The route can fall
+ * back to the in-process builder instead of hanging on a dead channel.
+ */
+export class BuilderUnavailableError extends Error {
+    constructor(message, options) {
+        super(message, options);
+        this.name = 'BuilderUnavailableError';
+        this.code = 'BUILDER_UNAVAILABLE';
+    }
+}
+
+/**
  * @param {object} options
  * @param {string} options.dataDir Directory with default-user/{characters,chats,worlds,settings.json,secrets.json}.
  * @param {string} [options.serverDir] SillyTavern checkout; defaults to the repo's SillyTavern/ inside the worker.
  * @param {(line: string) => void} [options.onLog]
  * @param {number} [options.readyTimeoutMs]
+ * @param {URL} [options.workerUrl] Entry module; tests substitute a fake worker.
  * @returns {{ready: () => Promise<void>, build: Function, close: Function, isWorker: true}}
  */
 export function createWorkerBuilder({
@@ -22,11 +35,14 @@ export function createWorkerBuilder({
     serverDir,
     onLog = () => {},
     readyTimeoutMs = DEFAULT_READY_TIMEOUT_MS,
+    workerUrl = new URL('./worker-entry.mjs', import.meta.url),
 }) {
     if (!dataDir) throw new Error('createWorkerBuilder: dataDir is required');
 
     let worker = null;
+    let workerAlive = false;
     let readyPromise = null;
+    let readyTimer = null;
     let resolveReady = null;
     let rejectReady = null;
     let readySettled = false;
@@ -43,42 +59,62 @@ export function createWorkerBuilder({
     function settleReady(error) {
         if (readySettled) return;
         readySettled = true;
+        clearTimeout(readyTimer);
+        readyTimer = null;
         if (error) rejectReady?.(error);
         else resolveReady?.();
     }
 
-    function spawn() {
-        if (worker) return worker;
+    /**
+     * Drops a dead worker. The next build() spawns a fresh one; anything that
+     * was waiting on the dead worker settles with a typed error instead of
+     * hanging on a channel nobody reads.
+     */
+    function retire(current, error) {
+        if (worker !== current) return; // exit from an already-replaced worker
+        workerAlive = false;
+        settleReady(error);
+        failPending(error);
+        worker = null;
+        readyPromise = null;
+        resolveReady = null;
+        rejectReady = null;
+        readySettled = false;
+    }
 
+    function spawn() {
+        if (worker && workerAlive) return worker;
+
+        readySettled = false;
         readyPromise = new Promise((resolve, reject) => {
             resolveReady = resolve;
             rejectReady = reject;
         });
-        const readyTimer = setTimeout(() => {
-            settleReady(new Error(`prompt builder worker was not ready within ${readyTimeoutMs}ms`));
+        readyTimer = setTimeout(() => {
+            settleReady(new BuilderUnavailableError(`prompt builder worker was not ready within ${readyTimeoutMs}ms`));
         }, readyTimeoutMs);
         readyTimer.unref?.();
 
-        worker = new Worker(new URL('./worker-entry.mjs', import.meta.url), {
+        const current = new Worker(workerUrl, {
             workerData: { dataDir, serverDir },
             // Builder output is forwarded through postMessage/onLog; nothing
             // in the worker should write to the parent's console directly.
             stderr: false,
             stdout: false,
         });
+        worker = current;
+        workerAlive = true;
 
-        worker.on('message', message => {
+        current.on('message', message => {
             switch (message?.type) {
                 case 'log':
                     onLog(message.line);
                     break;
                 case 'ready':
-                    clearTimeout(readyTimer);
                     settleReady(null);
                     break;
                 case 'fatal':
-                    clearTimeout(readyTimer);
-                    settleReady(new Error(String(message.message)));
+                    settleReady(new BuilderUnavailableError(String(message.message)));
                     break;
                 case 'result': {
                     const entry = pending.get(message.id);
@@ -101,39 +137,44 @@ export function createWorkerBuilder({
             }
         });
 
-        worker.on('error', error => {
-            clearTimeout(readyTimer);
-            settleReady(error instanceof Error ? error : new Error(String(error)));
-            failPending(error instanceof Error ? error : new Error(String(error)));
+        current.on('error', error => {
+            retire(current, error instanceof BuilderUnavailableError
+                ? error
+                : new BuilderUnavailableError(`prompt builder worker failed: ${error?.message || error}`, { cause: error }));
         });
 
-        worker.on('exit', code => {
-            clearTimeout(readyTimer);
-            const error = new Error(`prompt builder worker exited (${code})`);
-            settleReady(error);
-            failPending(error);
+        current.on('exit', code => {
+            retire(current, new BuilderUnavailableError(`prompt builder worker exited (${code})`));
         });
 
-        return worker;
+        return current;
     }
 
     function ready() {
-        if (closed) return Promise.reject(new Error('prompt builder worker is closed'));
+        if (closed) return Promise.reject(new BuilderUnavailableError('prompt builder worker is closed'));
         spawn();
         return readyPromise;
     }
 
     function build(options) {
         const run = queue.then(async () => {
-            if (closed) throw new Error('prompt builder worker is closed');
-            spawn();
+            if (closed) throw new BuilderUnavailableError('prompt builder worker is closed');
+            const current = spawn();
             await readyPromise;
+            if (!workerAlive || worker !== current || current.threadId === -1) {
+                throw new BuilderUnavailableError('prompt builder worker exited before the build started');
+            }
 
             const id = ++seq;
             const result = new Promise((resolve, reject) => {
                 pending.set(id, { resolve, reject });
             });
-            worker.postMessage({ type: 'build', id, options });
+            try {
+                current.postMessage({ type: 'build', id, options });
+            } catch (error) {
+                pending.delete(id);
+                throw new BuilderUnavailableError(`could not reach the prompt builder worker: ${error?.message || error}`, { cause: error });
+            }
             return result;
         });
         // Keep the queue alive after a failed build, but let this caller see
@@ -146,8 +187,10 @@ export function createWorkerBuilder({
         closed = true;
         await queue.catch(() => {});
         const current = worker;
+        const alive = workerAlive;
         worker = null;
-        if (!current) return;
+        workerAlive = false;
+        if (!current || !alive) return;
         await new Promise(resolve => {
             const timer = setTimeout(() => {
                 current.terminate().finally(resolve);

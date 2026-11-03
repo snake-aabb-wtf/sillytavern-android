@@ -387,6 +387,54 @@ export function getDefaultBuilder() {
 }
 
 /**
+ * Builds with one recovery step for a worker that died.
+ *
+ * worker-client respawns on the next build, so a single retry covers a crash
+ * between turns. Only when a fresh worker also fails does the route fall back
+ * to the in-process builder (typed `BUILDER_UNAVAILABLE`, never a hang).
+ */
+let inlineBuilderPromise = null;
+
+async function buildWithRecovery(options) {
+    let lastError = null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+            const builder = await getDefaultBuilder();
+            return await builder.build(options);
+        } catch (error) {
+            if (error?.code !== 'BUILDER_UNAVAILABLE') throw error;
+            lastError = error;
+            console.warn(`[native] prompt builder worker unavailable (attempt ${attempt + 1}): ${error.message}`);
+        }
+    }
+
+    if (!inlineBuilderPromise) {
+        inlineBuilderPromise = (async () => {
+            const dataDir = globalThis.DATA_ROOT;
+            if (!dataDir) throw new Error('globalThis.DATA_ROOT is not set; cannot start the prompt builder');
+            const serverDir = path.resolve(HERE, '../..');
+            const { createBuilder } = await import('../prompt-builder/index.mjs');
+            const builder = await createBuilder({
+                dataDir,
+                serverDir,
+                onLog: line => console.info(`[native-builder] ${line}`),
+            });
+            defaultBuilderPromise = Promise.resolve(builder);
+            return builder;
+        })();
+        inlineBuilderPromise.catch(() => {
+            inlineBuilderPromise = null;
+        });
+    }
+    const inline = await inlineBuilderPromise;
+    try {
+        return await inline.build(options);
+    } catch (error) {
+        throw new Error(`prompt builder unavailable: ${lastError?.message || 'worker lost'}; in-process fallback failed: ${error?.message || error}`);
+    }
+}
+
+/**
  * Forwards the built body back into this same server's existing provider
  * route. provider dispatch (keys, presets, proxies, streaming format) is not
  * reimplemented here: the loopback request runs the normal Express handler.
@@ -446,7 +494,7 @@ export function warmDefaultBuilder({ port = globalThis.COMMAND_LINE_ARGS?.port ?
 }
 
 const defaultRouter = createNativeChatRouter({
-    builder: { build: options => getDefaultBuilder().then(builder => builder.build(options)) },
+    builder: { build: options => buildWithRecovery(options) },
     forward: (request) => createDefaultForward()(request),
     log: message => console.info(message),
 });
