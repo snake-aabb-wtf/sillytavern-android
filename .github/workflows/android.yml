@@ -2,8 +2,9 @@ name: Android
 
 # Push builds are artifact-only; tags st-sol-* additionally publish a Release.
 # The APK is the deliverable, so every push to the working branches must produce
-# one. No secrets are needed: the debug keystore is committed and libnode is a
-# public npm tarball.
+# one. No secrets are needed: the debug keystore is committed, headers come from a
+# public npm tarball, and libnode.so is a public Release asset built by
+# libnode-intl.yml.
 
 on:
   push:
@@ -23,6 +24,9 @@ concurrency:
 
 env:
   NODEJS_MOBILE_VERSION: 18.20.4
+  # ICU-enabled libnode.so (see libnode-intl.yml). The npm package build uses
+  # --with-intl=none, so `\p{...}` regexes and Intl fail at runtime.
+  LIBNODE_TAG: libnode-intl-18.20.4
   # versionCode keeps each build installable over the previous one. versionName is
   # derived below: the tag for tag builds, "1.0.<run_number>" for branch pushes.
   VERSION_CODE: ${{ github.run_number }}
@@ -84,20 +88,34 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-gradle-
 
+      # Keyed by the libnode release tag so a rebuilt .so is never masked by an
+      # old cache entry.
       - name: Cache libnode
         uses: actions/cache@v4
         with:
           path: android/nodejs-mobile/libnode
-          key: ${{ runner.os }}-libnode-${{ env.NODEJS_MOBILE_VERSION }}
+          key: ${{ runner.os }}-libnode-intl-${{ env.LIBNODE_TAG }}
 
       # CMake expects android/nodejs-mobile/libnode/{include/node, bin/<abi>/libnode.so}.
+      # Headers come from the npm package (identical either way); the .so comes from
+      # the ICU-enabled Release built by libnode-intl.yml.
+      #
+      # Fallback: the npm package's libnode.so is built with --with-intl=none, which
+      # breaks `\p{...}` regexes ("Invalid property name") and removes Intl. Do not
+      # fall back to it silently.
       - name: Fetch libnode
         run: |
           set -euo pipefail
           LIBNODE_DIR=android/nodejs-mobile/libnode
-          if [[ -f "$LIBNODE_DIR/include/node/node.h" && -s "$LIBNODE_DIR/bin/arm64-v8a/libnode.so" ]]; then
-            echo "libnode already present (cache hit)"
-            exit 0
+          SO="$LIBNODE_DIR/bin/arm64-v8a/libnode.so"
+          if [[ -f "$LIBNODE_DIR/include/node/node.h" && -s "$SO" ]]; then
+            strings -a "$SO" > /tmp/libnode-cache.strings
+            if grep -q icudt /tmp/libnode-cache.strings; then
+              echo "ICU libnode already present (cache hit)"
+              exit 0
+            fi
+            echo "cached libnode lacks ICU data; refetching"
+            rm -f "$SO"
           fi
           tmp="$(mktemp -d)"
           trap 'rm -rf "$tmp"' EXIT
@@ -106,9 +124,15 @@ jobs:
           tar -C "$tmp" -xzf "$tmp/njm.tgz"
           mkdir -p "$LIBNODE_DIR/bin/arm64-v8a"
           cp -a "$tmp/package/android/libnode/include" "$LIBNODE_DIR/"
-          cp -a "$tmp/package/android/libnode/bin/arm64-v8a/libnode.so" "$LIBNODE_DIR/bin/arm64-v8a/"
+          curl -fSL --retry 3 -o "$SO" \
+            "https://github.com/${GITHUB_REPOSITORY}/releases/download/${LIBNODE_TAG}/libnode.so"
           test -s "$LIBNODE_DIR/include/node/node.h"
-          test -s "$LIBNODE_DIR/bin/arm64-v8a/libnode.so"
+          test -s "$SO"
+          test "$(stat -c %s "$SO")" -gt 41943040
+          strings -a "$SO" > "$tmp/strings.txt"
+          grep -q icudt "$tmp/strings.txt"
+          grep -q 'Intl' "$tmp/strings.txt"
+          echo "libnode.so: $(du -h "$SO" | cut -f1) (ICU data present)"
 
       # Produces dist/runtime/{server,seed} and dist/runtime.zip (5-15 min).
       - name: Stage runtime
