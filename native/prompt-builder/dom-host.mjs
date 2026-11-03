@@ -124,6 +124,25 @@ function installShims(window) {
     window.scrollTo ??= () => {};
     window.scrollBy ??= () => {};
 
+    // jsdom does not implement the CSS namespace object; several modules call
+    // CSS.supports() at import time and CSS.escape() when building selectors.
+    if (!window.CSS) window.CSS = {};
+    window.CSS.supports ??= () => false;
+    window.CSS.escape ??= value => String(value)
+        .replace(/[^a-zA-Z0-9_\u00A0-\uFFFF-]/g, character => `\\${character}`);
+
+    if (window.navigator && !window.navigator.clipboard) {
+        Object.defineProperty(window.navigator, 'clipboard', {
+            configurable: true,
+            value: {
+                writeText: async () => {},
+                readText: async () => '',
+                read: async () => [],
+                write: async () => {},
+            },
+        });
+    }
+
     const elementProto = window.Element?.prototype;
     if (elementProto) {
         elementProto.scrollIntoView ??= function () {};
