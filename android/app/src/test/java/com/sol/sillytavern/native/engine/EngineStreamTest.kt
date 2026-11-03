@@ -142,8 +142,10 @@ class EngineStreamTest {
     }
 
     @Test
-    fun jsonHttpErrorUsesTheServerMessage() = runBlocking {
+    fun jsonHttpErrorUsesCodeAndServerMessage() = runBlocking {
         // Longer than the 200-byte snippet: truncating before parsing was the bug.
+        // The status code must still reach the bubble; the server's `error`
+        // field alone reads like a client-side failure.
         val longMessage = "x".repeat(300)
         val client = serveStream(json("""{"error":"$longMessage"}""", 500))
 
@@ -151,7 +153,7 @@ class EngineStreamTest {
             client.stream("/api/chat", buildJsonObject { }).toList()
         }
 
-        assertEquals(listOf<ChatEvent>(ChatEvent.Failure(longMessage)), events)
+        assertEquals(listOf<ChatEvent>(ChatEvent.Failure("HTTP 500: $longMessage")), events)
     }
 
     @Test
