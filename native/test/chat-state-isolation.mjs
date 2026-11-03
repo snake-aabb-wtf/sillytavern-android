@@ -93,7 +93,7 @@ async function main() {
         assert.ok(token, 'could not obtain a CSRF token from the builder server');
 
         const request = async (relative, init = {}) => {
-            const response = await REAL_FETCH(url(relative), {
+            const send = () => REAL_FETCH(url(relative), {
                 ...init,
                 headers: {
                     cookie: jar.header(),
@@ -102,6 +102,17 @@ async function main() {
                     ...init.headers,
                 },
             });
+            let response;
+            try {
+                response = await send();
+            } catch (error) {
+                // The builder server closes idle keep-alive sockets; undici can
+                // pick one up in the race and report a bare "fetch failed".
+                // The requests here are idempotent, so one retry is safe.
+                const code = error?.cause?.code ?? error?.code;
+                trace(`retrying ${relative} after ${code ?? error?.message ?? error}`);
+                response = await send();
+            }
             jar.store(response);
             return response;
         };
