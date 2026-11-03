@@ -13,8 +13,12 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -35,17 +39,29 @@ import com.sol.sillytavern.native.vm.CharactersUiState
  * Two-column character grid.
  *
  * Stateless: the caller owns the view model, so a preview or a test can drive every
- * one of the four states without a server.
+ * one of the four states without a server. [onSettings] is the only entry point to
+ * the provider form; it is on the list screen because a fresh install has no other
+ * way to configure an API.
  */
 @Composable
 fun CharactersScreen(
     state: CharactersUiState,
     avatarUrl: (String) -> String,
     onCharacterClick: (Character) -> Unit,
+    onSettings: () -> Unit,
     onRetry: () -> Unit,
 ) {
     Scaffold(
-        topBar = { SolTopBar("角色") },
+        topBar = {
+            SolTopBar(
+                title = "角色",
+                actions = {
+                    IconButton(onClick = onSettings) {
+                        Icon(Icons.Filled.Settings, contentDescription = "连接设置")
+                    }
+                },
+            )
+        },
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
     ) { padding ->
         val contentModifier = Modifier.fillMaxSize().padding(padding)

@@ -3,6 +3,7 @@ package com.sol.sillytavern.native.ui.common
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -28,10 +29,17 @@ import androidx.compose.ui.unit.dp
  *
  * `windowInsets` is zero on purpose: `MainActivity` already pads the root view by the
  * system bars, so a bar that consumed them again would leave a status-bar tall gap.
+ *
+ * [actions] lets a screen add its own entry point (the character list uses it for the
+ * connection settings gear) without inventing a second bar.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SolTopBar(title: String, onBack: (() -> Unit)? = null) {
+fun SolTopBar(
+    title: String,
+    onBack: (() -> Unit)? = null,
+    actions: @Composable RowScope.() -> Unit = {},
+) {
     TopAppBar(
         title = { Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
         navigationIcon = {
@@ -41,6 +49,7 @@ fun SolTopBar(title: String, onBack: (() -> Unit)? = null) {
                 }
             }
         },
+        actions = actions,
         windowInsets = WindowInsets(0, 0, 0, 0),
     )
 }

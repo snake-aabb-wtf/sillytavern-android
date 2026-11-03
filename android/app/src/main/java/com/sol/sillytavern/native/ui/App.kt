@@ -21,22 +21,26 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.sol.sillytavern.native.data.CharacterRepository
 import com.sol.sillytavern.native.data.ChatRepository
+import com.sol.sillytavern.native.data.SettingsRepository
 import com.sol.sillytavern.native.engine.EngineClient
 import com.sol.sillytavern.native.ui.chat.ChatScreen
 import com.sol.sillytavern.native.ui.characters.CharactersScreen
 import com.sol.sillytavern.native.ui.chats.ChatsScreen
+import com.sol.sillytavern.native.ui.settings.SettingsScreen
 import com.sol.sillytavern.native.vm.CharacterSource
 import com.sol.sillytavern.native.vm.CharactersVM
 import com.sol.sillytavern.native.vm.ChatSource
 import com.sol.sillytavern.native.vm.ChatTurn
 import com.sol.sillytavern.native.vm.ChatVM
 import com.sol.sillytavern.native.vm.ChatsVM
+import com.sol.sillytavern.native.vm.SettingsVM
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 
 /** Route patterns and builders. Arguments are percent-encoded, never concatenated raw. */
 object Routes {
     const val CHARACTERS = "characters"
+    const val SETTINGS = "settings"
     const val CHATS_PATTERN = "chats/{avatar}"
     const val CHAT_PATTERN = "chat/{avatar}/{file}"
 
@@ -87,7 +91,29 @@ fun SolApp(port: Int, onFirstFrame: () -> Unit = {}) {
                         onCharacterClick = { character ->
                             navController.navigate(Routes.chats(character.avatar))
                         },
+                        onSettings = { navController.navigate(Routes.SETTINGS) },
                         onRetry = charactersVM::refresh,
+                    )
+                }
+
+                composable(Routes.SETTINGS) {
+                    // Owned by this entry: leaving the form and coming back reloads from
+                    // disk, so a failed save is never shown as an unsaved success.
+                    val settingsVM: SettingsVM = viewModel(
+                        factory = client.settingsVMFactory(),
+                    )
+                    val state by settingsVM.state.collectAsState()
+                    SettingsScreen(
+                        state = state,
+                        onProviderChange = settingsVM::selectProvider,
+                        onBaseUrlChange = settingsVM::setBaseUrl,
+                        onCustomModelChange = settingsVM::setCustomModel,
+                        onOpenRouterModelChange = settingsVM::setOpenRouterModel,
+                        onOpenAiModelChange = settingsVM::setOpenAiModel,
+                        onApiKeyChange = settingsVM::setApiKey,
+                        onSave = settingsVM::save,
+                        onRetry = settingsVM::refresh,
+                        onBack = { navController.popBackStack() },
                     )
                 }
 
@@ -155,9 +181,12 @@ private class SolClient(port: Int) {
     private val engine = EngineClient(baseUrl)
     private val characterRepository = CharacterRepository(engine)
     private val chatRepository = ChatRepository(engine)
+    private val settingsRepository = SettingsRepository(engine)
 
     val characters = CharacterSource { characterRepository.list() }
     val chats = ChatSource { avatar -> chatRepository.list(avatar) }
+
+    fun settingsVMFactory(): ViewModelProvider.Factory = SettingsVM.of(settingsRepository)
 
     /**
      * One chat turn: the posted body is fixed by `native/endpoints/native-chat.mjs`

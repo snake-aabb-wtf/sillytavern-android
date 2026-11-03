@@ -1,0 +1,213 @@
+package com.sol.sillytavern.native.data
+
+import com.sol.sillytavern.native.data.model.string
+import com.sol.sillytavern.native.engine.EngineClient
+import com.sol.sillytavern.native.engine.EngineError
+import kotlinx.serialization.SerializationException
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.put
+
+/** The three providers the native client can configure. */
+enum class ChatProvider(val source: String, val secretKey: String) {
+    /** Any OpenAI-compatible endpoint: `custom_url` + `custom_model`. */
+    CUSTOM("custom", "api_key_custom"),
+
+    /** OpenRouter: `openrouter_model`. */
+    OPENROUTER("openrouter", "api_key_openrouter"),
+
+    /** api.openai.com: `openai_model`. */
+    OPENAI("openai", "api_key_openai");
+
+    companion object {
+        /** Unknown sources fall back to the official provider; saving then replaces it. */
+        fun fromSource(source: String): ChatProvider =
+            entries.firstOrNull { it.source == source } ?: OPENAI
+    }
+}
+
+/**
+ * The provider settings the app owns.
+ *
+ * Only the active preset's model field is written on save; the other presets'
+ * values are read so switching back does not lose them.
+ */
+data class ProviderConfig(
+    val provider: ChatProvider = ChatProvider.OPENAI,
+    /** Base URL of the OpenAI-compatible endpoint (`custom_url` in settings.json). */
+    val baseUrl: String = "",
+    val customModel: String = "",
+    val openRouterModel: String = "",
+    val openAiModel: String = "",
+)
+
+/**
+ * `settings.json` could not be parsed, or its shape is not what the endpoints
+ * documented. Load must fail loudly: `POST /api/settings/save` replaces the file
+ * wholesale (`SillyTavern/src/endpoints/settings.js:207-216`), so guessing a shape
+ * and saving would delete the user's configuration.
+ */
+class SettingsFormatException(message: String, cause: Throwable? = null) : Exception(message, cause)
+
+/** A settings/secrets call answered non-2xx; [message] is `HTTP <code>: <first line>`. */
+class SettingsHttpException(val code: Int, val detail: String) :
+    Exception(if (detail.isBlank()) "HTTP $code" else "HTTP $code: $detail")
+
+/**
+ * Reads and writes the provider block of `settings.json` through the bundled server.
+ *
+ * Wire contract, verified in the server source:
+ *  - `POST /api/settings/get` returns `{ settings: "<raw settings.json>", ...presets }`
+ *    (`settings.js:219-268`). `settings` is a **string**, not an object.
+ *  - `POST /api/settings/save` writes the request body wholesale to the file
+ *    (`settings.js:207-216`). The repository therefore parses the raw string,
+ *    patches only the fields of the selected provider (all of them live inside
+ *    `oai_settings`), and posts the whole document back. Unknown top-level keys and
+ *    unknown nested objects are preserved because the parsed map is copied, not
+ *    rebuilt.
+ *  - API keys never enter `settings.json`: they go to `POST /api/secrets/write`
+ *    as `{ key, value, label }` (`secrets.js:511-526`). `/api/secrets/read` returns
+ *    only ids/labels, so the stored value cannot be read back by this screen.
+ *
+ * Field placement is taken from the client that actually builds requests:
+ * `oai_settings.chat_completion_source`, `oai_settings.custom_url` and
+ * `custom_model` for the custom source (`public/scripts/openai.js:2923`,
+ * `getChatCompletionModel`), `oai_settings.openrouter_model` for OpenRouter, and
+ * `oai_settings.openai_model` for OpenAI. `reverse_proxy` is the proxy for the
+ * *official* providers (`openai.js:2739-2749`) and is deliberately untouched.
+ */
+class SettingsRepository(private val engine: EngineClient) {
+
+    private val json = Json { ignoreUnknownKeys = true }
+
+    /** Loads the provider block; throws [SettingsFormatException] on an unreadable file. */
+    suspend fun load(): ProviderConfig = configOf(readRoot())
+
+    /**
+     * Patches the selected provider and saves the whole document.
+     *
+     * A non-blank [apiKey] is written to the secrets store first, so a failed
+     * settings write cannot leave a new key active against a provider that was
+     * never selected. A blank key leaves the stored secret untouched.
+     */
+    suspend fun save(config: ProviderConfig, apiKey: String?) {
+        // Read and parse before any write: a broken file must abort the whole
+        // operation, not be silently replaced by a partial object.
+        val root = readRoot()
+        val patched = patchOaiSettings(root, fieldsFor(config))
+
+        val key = apiKey?.trim().orEmpty()
+        if (key.isNotEmpty()) {
+            post(
+                PATH_SECRETS_WRITE,
+                buildJsonObject {
+                    put("key", config.provider.secretKey)
+                    put("value", key)
+                    put("label", SECRET_LABEL)
+                },
+            )
+        }
+        post(PATH_SAVE, patched)
+    }
+
+    private suspend fun readRoot(): JsonObject {
+        val payload = post(PATH_GET, buildJsonObject { })
+        val raw = (payload as? JsonObject)
+            ?.get("settings")
+            ?.let { it as? JsonPrimitive }
+            ?.contentOrNull
+            ?: throw SettingsFormatException(
+                "/api/settings/get returned no settings string; refusing to overwrite the file blind",
+            )
+        return parseSettings(raw)
+    }
+
+    private fun parseSettings(raw: String): JsonObject {
+        val element = try {
+            json.parseToJsonElement(raw)
+        } catch (error: SerializationException) {
+            throw SettingsFormatException(
+                "settings.json is not valid JSON; refusing to overwrite it",
+                error,
+            )
+        }
+        return element as? JsonObject
+            ?: throw SettingsFormatException("settings.json is not a JSON object; refusing to overwrite it")
+    }
+
+    private fun configOf(root: JsonObject): ProviderConfig {
+        val oai = root["oai_settings"] as? JsonObject ?: JsonObject(emptyMap())
+        return ProviderConfig(
+            provider = ChatProvider.fromSource(oai.string("chat_completion_source")),
+            baseUrl = oai.string("custom_url"),
+            customModel = oai.string("custom_model"),
+            openRouterModel = oai.string("openrouter_model"),
+            openAiModel = oai.string("openai_model"),
+        )
+    }
+
+    private fun fieldsFor(config: ProviderConfig): Map<String, JsonElement> = when (config.provider) {
+        ChatProvider.CUSTOM -> mapOf(
+            "chat_completion_source" to JsonPrimitive(config.provider.source),
+            // `reverse_proxy` is not used for the custom source; the client puts
+            // this value into `custom_url` when it builds the request body.
+            "custom_url" to JsonPrimitive(config.baseUrl.trim()),
+            "custom_model" to JsonPrimitive(config.customModel.trim()),
+        )
+
+        ChatProvider.OPENROUTER -> mapOf(
+            "chat_completion_source" to JsonPrimitive(config.provider.source),
+            "openrouter_model" to JsonPrimitive(config.openRouterModel.trim()),
+        )
+
+        ChatProvider.OPENAI -> mapOf(
+            "chat_completion_source" to JsonPrimitive(config.provider.source),
+            "openai_model" to JsonPrimitive(config.openAiModel.trim()),
+        )
+    }
+
+    private suspend fun post(path: String, body: JsonElement): JsonElement = try {
+        engine.postJson(path, body)
+    } catch (error: EngineError.Http) {
+        throw SettingsHttpException(error.code, firstLine(error.body))
+    }
+
+    /** The first non-blank line of an error body, bounded so a stack cannot fill the screen. */
+    private fun firstLine(body: String): String = body
+        .lineSequence()
+        .map { it.trim() }
+        .firstOrNull { it.isNotEmpty() }
+        ?.take(MAX_ERROR_LINE)
+        .orEmpty()
+
+    private companion object {
+        const val PATH_GET = "/api/settings/get"
+        const val PATH_SAVE = "/api/settings/save"
+        const val PATH_SECRETS_WRITE = "/api/secrets/write"
+        const val SECRET_LABEL = "SillyTavern Android"
+        const val MAX_ERROR_LINE = 200
+    }
+}
+
+/**
+ * Returns [root] with [patches] merged into its `oai_settings` object.
+ *
+ * Every other key — top-level or nested — is copied through unchanged. A missing
+ * `oai_settings` is created; one that exists but is not an object is refused,
+ * because replacing it would discard whatever the user had there.
+ */
+internal fun patchOaiSettings(root: JsonObject, patches: Map<String, JsonElement>): JsonObject {
+    val existing = root["oai_settings"]
+    val oai = when (existing) {
+        null -> JsonObject(emptyMap())
+        is JsonObject -> existing
+        else -> throw SettingsFormatException("settings.json oai_settings is not an object; refusing to overwrite it")
+    }
+    val mergedOai = oai.toMutableMap().apply { putAll(patches) }
+    val mergedRoot = root.toMutableMap().apply { put("oai_settings", JsonObject(mergedOai)) }
+    return JsonObject(mergedRoot)
+}
