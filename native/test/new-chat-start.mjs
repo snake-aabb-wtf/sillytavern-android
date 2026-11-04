@@ -162,7 +162,9 @@ async function main() {
             expectGreeting: false,
         });
     } finally {
-        fs.rmSync(tmpRoot, { recursive: true, force: true });
+        // The builder's server can still be flushing files when close() returns;
+        // a plain rmSync then fails with ENOTEMPTY and turns a PASS into a red job.
+        fs.rmSync(tmpRoot, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
     }
 }
 
