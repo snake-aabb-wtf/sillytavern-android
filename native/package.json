@@ -10,7 +10,7 @@
     "test:custom-source": "node test/custom-source.mjs",
     "test:new-chat": "node test/new-chat-start.mjs",
     "test:unit": "node --test test/native-chat.test.mjs test/worker-recovery.mjs test/backend-preflight.test.mjs",
-    "test:backend-refresh": "node --test test/backend-refresh.test.mjs"
+    "test:backend-refresh": "node --test --test-force-exit test/backend-refresh.test.mjs"
   },
   "dependencies": {
     "jsdom": "26.1.0"
