@@ -6,17 +6,13 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Modifier
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.ViewModelProvider
-import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
@@ -40,6 +36,9 @@ import com.sol.sillytavern.native.vm.ChatVM
 import com.sol.sillytavern.native.vm.ChatsVM
 import com.sol.sillytavern.native.vm.NewChatCreator
 import com.sol.sillytavern.native.vm.SettingsVM
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.map
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 
@@ -140,21 +139,6 @@ fun SolApp(port: Int, onFirstFrame: () -> Unit = {}) {
                     val creating by chatsVM.creating.collectAsState()
                     val createError by chatsVM.createError.collectAsState()
                     val created by chatsVM.created.collectAsState()
-                    // The list is loaded once in `init`; coming back from a chat must
-                    // show the reply that was just written, not the preview from
-                    // before. The first resume is the entry's own load, so only
-                    // later resumes refresh.
-                    val lifecycleOwner = LocalLifecycleOwner.current
-                    val firstResume = remember { booleanArrayOf(true) }
-                    DisposableEffect(lifecycleOwner) {
-                        val observer = LifecycleEventObserver { _, event ->
-                            if (event == Lifecycle.Event.ON_RESUME) {
-                                if (firstResume[0]) firstResume[0] = false else chatsVM.refresh()
-                            }
-                        }
-                        lifecycleOwner.lifecycle.addObserver(observer)
-                        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
-                    }
                     // One-shot event: consume before navigating so this entry does not
                     // reopen the same file on every recomposition.
                     LaunchedEffect(created) {
@@ -230,6 +214,13 @@ private class SolClient(port: Int) {
     val characters = CharacterSource { characterRepository.list() }
     val chats = ChatSource { avatar -> chatRepository.list(avatar) }
 
+    /**
+     * Avatar names whose chat file was just written. A list entry on the back
+     * stack has no composition while a chat is on top, so it cannot refresh on
+     * resume; the view model collects this instead and reloads its preview.
+     */
+    private val chatSaved = MutableSharedFlow<String>(extraBufferCapacity = 16)
+
     private val newChatService = NewChatService(characterRepository, chatRepository)
 
     fun settingsVMFactory(): ViewModelProvider.Factory = SettingsVM.of(settingsRepository)
@@ -239,6 +230,7 @@ private class SolClient(port: Int) {
         avatar = avatar,
         source = chats,
         creator = NewChatCreator { name -> newChatService.create(avatar, name) },
+        signals = chatSaved.filter { it == avatar }.map { },
     )
 
     /**
@@ -258,7 +250,13 @@ private class SolClient(port: Int) {
                 },
             )
         }
-        return ChatVM.of(avatar, file, chatRepository, turn)
+        return ChatVM.of(
+            avatar,
+            file,
+            chatRepository,
+            turn,
+            onSaved = { chatSaved.tryEmit(avatar) },
+        )
     }
 
     /**

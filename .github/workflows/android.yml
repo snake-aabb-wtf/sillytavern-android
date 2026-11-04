@@ -39,7 +39,9 @@ jobs:
     env:
       # Secrets are not readable in a step-level `if`; this job env decides
       # whether the release APK is signed. Pull requests from forks see "false".
-      HAS_RELEASE_KEYSTORE: ${{ secrets.RELEASE_KEYSTORE_BASE64 != '' }}
+      # Gradle needs all four values; gate on the same set it does so a partial
+      # secret setup falls back to the debug artifact instead of failing later.
+      HAS_RELEASE_KEYSTORE: ${{ secrets.RELEASE_KEYSTORE_BASE64 != '' && secrets.RELEASE_KEYSTORE_PASSWORD != '' && secrets.RELEASE_KEY_ALIAS != '' && secrets.RELEASE_KEY_PASSWORD != '' }}
     outputs:
       release-apk: ${{ steps.release_apk.outputs.available }}
     steps:

@@ -31,8 +31,9 @@ val releaseSigningConfigured = listOf(
     envReleaseKeyPassword,
 ).all { it.isNotBlank() }
 
-// Decoded to RUNNER_TEMP in CI and to the build directory locally, never into
-// the source tree, and removed with the build output.
+// Decoded to $RUNNER_TEMP in CI (a throwaway runner directory, discarded with the
+// job) or to the build directory locally (removed by `clean`); never into the
+// source tree and never committed.
 val releaseKeystoreFile: File? = if (releaseSigningConfigured) {
     val target = File(
         System.getenv("RUNNER_TEMP")?.takeIf { it.isNotBlank() } ?: layout.buildDirectory.get().asFile.path,
@@ -144,8 +145,6 @@ dependencies {
     // Compose 1.7.x (navigation 2.8) and lifecycle 2.8.7 used above.
     implementation("androidx.navigation:navigation-compose:2.8.4")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
-    // LocalLifecycleOwner + lifecycle observers inside Compose (chat-list resume refresh).
-    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
     // Coil 2.7 is built on the same OkHttp 4.12 line as the engine client, so the

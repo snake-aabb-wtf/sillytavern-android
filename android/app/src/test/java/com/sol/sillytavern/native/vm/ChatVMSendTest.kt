@@ -293,6 +293,75 @@ class ChatVMSendTest {
     }
 
     @Test
+    fun aSuccessfulTurnSignalsTheChatList() = runTest {
+        var signals = 0
+        val store = FakeStore(Chat(header, listOf(greeting)))
+        val vm = ChatVM(
+            AVATAR,
+            FILE,
+            store,
+            ChatTurn {
+                flow {
+                    emit(ChatEvent.Delta("Hello"))
+                    emit(ChatEvent.Done)
+                }
+            },
+            onSaved = { signals++ },
+        )
+
+        vm.send("Hi")
+
+        assertEquals("the list must learn about the new preview", 1, signals)
+    }
+
+    @Test
+    fun aStopSaveAlsoSignalsTheChatList() = runTest {
+        var signals = 0
+        val store = FakeStore(Chat(header, listOf(greeting)))
+        val never = CompletableDeferred<Unit>()
+        val vm = ChatVM(
+            AVATAR,
+            FILE,
+            store,
+            ChatTurn {
+                flow {
+                    emit(ChatEvent.Delta("Hel"))
+                    never.await()
+                }
+            },
+            onSaved = { signals++ },
+        )
+
+        vm.send("Hi")
+        vm.stop()
+
+        assertEquals("the persisted user line changes the preview too", 1, signals)
+    }
+
+    @Test
+    fun aFailedSaveDoesNotSignalTheChatList() = runTest {
+        var signals = 0
+        val store = FakeStore(Chat(header, listOf(greeting)))
+        store.onSave = { throw RuntimeException("disk full") }
+        val vm = ChatVM(
+            AVATAR,
+            FILE,
+            store,
+            ChatTurn {
+                flow {
+                    emit(ChatEvent.Delta("Hello"))
+                    emit(ChatEvent.Done)
+                }
+            },
+            onSaved = { signals++ },
+        )
+
+        vm.send("Hi")
+
+        assertEquals("nothing was written, so nothing may refresh", 0, signals)
+    }
+
+    @Test
     fun aNewChatSavesARealHeaderInsteadOfAnEmptyObject() = runTest {
         // `/api/chats/get` answers [] for a chat that does not exist yet; the
         // repository surfaces that as an empty metadata object. Writing `{}` back

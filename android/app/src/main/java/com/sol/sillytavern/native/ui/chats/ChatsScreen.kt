@@ -60,9 +60,6 @@ fun ChatsScreen(
     onBack: () -> Unit,
 ) {
     val snackbarHostState = remember { SnackbarHostState() }
-    // A fast double tap on a row would push the same chat twice; two ChatVMs on
-    // one file then overwrite each other's snapshot on save.
-    val rowDebouncer = remember { ClickDebouncer() }
     // A creation failure is reported beside the list, not instead of it: the existing
     // chats are still readable and the button stays available for a retry.
     LaunchedEffect(createError) {
@@ -99,14 +96,7 @@ fun ChatsScreen(
             )
             is ChatsUiState.Ready -> LazyColumn(modifier = contentModifier) {
                 items(state.chats, key = { it.file }) { chat ->
-                    ChatRow(
-                        chat = chat,
-                        onClick = {
-                            if (rowDebouncer.shouldAccept(SystemClock.uptimeMillis())) {
-                                onChatClick(chat)
-                            }
-                        },
-                    )
+                    ChatRow(chat = chat, onClick = { onChatClick(chat) })
                     HorizontalDivider()
                 }
             }
@@ -138,6 +128,10 @@ private fun NewChatEmpty(creating: Boolean, onNewChat: () -> Unit, modifier: Mod
 
 @Composable
 private fun ChatRow(chat: ChatSummary, onClick: () -> Unit) {
+    // One debounce window per chat: a shared one would swallow a legitimate tap
+    // on another row inside 300 ms. A fast double tap on *this* row would push
+    // the same destination twice and leave two ChatVMs overwriting one file.
+    val debouncer = remember(chat.file) { ClickDebouncer() }
     val preview = chat.lastMessage.takeIf { it.isNotBlank() }
     // Declared as a composable slot: a lambda inside `let` would not infer that type.
     val previewContent: (@Composable () -> Unit)? = if (preview != null) {
@@ -167,7 +161,9 @@ private fun ChatRow(chat: ChatSummary, onClick: () -> Unit) {
                 )
             }
         },
-        modifier = Modifier.clickable(onClick = onClick),
+        modifier = Modifier.clickable {
+            if (debouncer.shouldAccept(SystemClock.uptimeMillis())) onClick()
+        },
     )
 }
 

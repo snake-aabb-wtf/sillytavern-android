@@ -99,6 +99,12 @@ class ChatVM(
     private val file: String,
     private val store: ChatStore,
     private val turn: ChatTurn,
+    /**
+     * Fires after a transcript was written. The chat list may be alive on the
+     * back stack with its composition disposed, so it cannot refresh itself on
+     * return; `App` wires this to the same signal its `ChatsVM` collects.
+     */
+    private val onSaved: () -> Unit = {},
 ) : ViewModel() {
 
     private val _state = MutableStateFlow<ChatUiState>(ChatUiState.Loading)
@@ -334,6 +340,9 @@ class ChatVM(
             val ready = _state.value as? ChatUiState.Ready ?: return@withLock null
             try {
                 store.save(Chat(currentHeader(), ready.messages.persisted()))
+                // Only after a successful write: a failed save leaves the preview
+                // as it was and must not trigger a list reload.
+                onSaved()
                 null
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -428,15 +437,18 @@ class ChatVM(
             file: String,
             repository: ChatRepository,
             turn: ChatTurn,
-        ): ViewModelProvider.Factory = of(avatar, file, RepositoryStore(avatar, file, repository), turn)
+            onSaved: () -> Unit = {},
+        ): ViewModelProvider.Factory =
+            of(avatar, file, RepositoryStore(avatar, file, repository), turn, onSaved)
 
         fun of(
             avatar: String,
             file: String,
             store: ChatStore,
             turn: ChatTurn,
+            onSaved: () -> Unit = {},
         ): ViewModelProvider.Factory = viewModelFactory {
-            initializer { ChatVM(avatar, file, store, turn) }
+            initializer { ChatVM(avatar, file, store, turn, onSaved) }
         }
     }
 }
