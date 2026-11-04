@@ -8,7 +8,9 @@ name: Native parity
 on:
   push:
     branches:
+      - main
       - feature/compose-ui
+  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -41,6 +43,13 @@ jobs:
       - name: Install native harness dependencies
         working-directory: native
         run: npm ci --no-audit --no-fund
+
+      # Cheap protocol tests first: the route, worker recovery and the backend
+      # preflight run in seconds, so a failure here does not sit behind the
+      # Playwright capture or the jsdom builds.
+      - name: Run native protocol unit tests
+        working-directory: native
+        run: npm run test:unit
 
       - name: Install Chromium
         working-directory: native

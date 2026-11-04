@@ -10,6 +10,7 @@ on:
   push:
     branches:
       - main
+      - feature/compose-ui
     tags:
       - 'st-sol-*'
   workflow_dispatch:
@@ -87,13 +88,29 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-gradle-
 
-      # Keyed by the libnode release tag so a rebuilt .so is never masked by an
-      # old cache entry.
+      # The libnode cache is keyed by the Release asset's SHA-256, not the tag:
+      # a rebuilt .so uploaded under the same tag must not be masked by an old
+      # entry. The digest is also verified after the download below.
+      - name: Resolve libnode asset digest
+        id: libnode
+        run: |
+          set -euo pipefail
+          # Public release metadata; one unauthenticated request per build is well
+          # inside the runner's API rate limit, and no token belongs in this file.
+          sha="$(curl -fsSL --retry 3 \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${LIBNODE_TAG}" \
+            | python3 -c 'import json,sys; d=json.load(sys.stdin); a=next((x for x in d.get("assets",[]) if x.get("name")=="libnode.so"), {}); s=(a.get("digest") or ""); print(s[7:] if s.startswith("sha256:") else "")')"
+          if [[ -z "$sha" ]]; then
+            echo "::warning::libnode release asset has no sha256 digest; cache falls back to the tag"
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
       - name: Cache libnode
         uses: actions/cache@v4
         with:
           path: android/nodejs-mobile/libnode
-          key: ${{ runner.os }}-libnode-intl-${{ env.LIBNODE_TAG }}
+          key: ${{ runner.os }}-libnode-intl-${{ steps.libnode.outputs.sha || env.LIBNODE_TAG }}
 
       # CMake expects android/nodejs-mobile/libnode/{include/node, bin/<abi>/libnode.so}.
       # Headers come from the npm package (identical either way); the .so comes from
@@ -103,17 +120,27 @@ jobs:
       # breaks `\p{...}` regexes ("Invalid property name") and removes Intl. Do not
       # fall back to it silently.
       - name: Fetch libnode
+        env:
+          LIBNODE_SHA: ${{ steps.libnode.outputs.sha }}
         run: |
           set -euo pipefail
           LIBNODE_DIR=android/nodejs-mobile/libnode
           SO="$LIBNODE_DIR/bin/arm64-v8a/libnode.so"
           if [[ -f "$LIBNODE_DIR/include/node/node.h" && -s "$SO" ]]; then
-            strings -a "$SO" > /tmp/libnode-cache.strings
-            if grep -q icudt /tmp/libnode-cache.strings; then
+            ok=1
+            if [[ -n "$LIBNODE_SHA" ]] \
+                && ! echo "$LIBNODE_SHA  $SO" | sha256sum -c - >/dev/null 2>&1; then
+              echo "cached libnode does not match the Release asset; refetching"
+              ok=0
+            fi
+            if (( ok )) && ! strings -a "$SO" | grep -q icudt; then
+              echo "cached libnode lacks ICU data; refetching"
+              ok=0
+            fi
+            if (( ok )); then
               echo "ICU libnode already present (cache hit)"
               exit 0
             fi
-            echo "cached libnode lacks ICU data; refetching"
             rm -f "$SO"
           fi
           tmp="$(mktemp -d)"
@@ -127,6 +154,11 @@ jobs:
             "https://github.com/${GITHUB_REPOSITORY}/releases/download/${LIBNODE_TAG}/libnode.so"
           test -s "$LIBNODE_DIR/include/node/node.h"
           test -s "$SO"
+          if [[ -n "$LIBNODE_SHA" ]]; then
+            echo "$LIBNODE_SHA  $SO" | sha256sum -c -
+          else
+            echo "::warning::no release digest; cannot checksum libnode.so"
+          fi
           test "$(stat -c %s "$SO")" -gt 41943040
           strings -a "$SO" > "$tmp/strings.txt"
           grep -q icudt "$tmp/strings.txt"
@@ -157,6 +189,22 @@ jobs:
           set -euo pipefail
           node -v
           NODE18="$(command -v node)" bash scripts/smoke-node18.sh dist/runtime.zip
+
+      # The smoke test only proves the web root answers. The shipped APK is
+      # useless if /api/native was not mounted, so boot the same staged tree and
+      # assert the route exists (400 for an empty body, ahead of the 404).
+      - name: Verify the staged /api/native mount
+        run: bash scripts/verify-native-endpoint.sh dist/runtime
+
+      # Parity normally builds from the source checkout. This builds from the
+      # staged, pruned, production-dependencies tree that ships inside the APK,
+      # so a missing asset or dev-only dependency fails here instead of on a
+      # user's first message.
+      - name: Build a prompt from the staged runtime
+        run: |
+          set -euo pipefail
+          (cd native && npm ci --no-audit --no-fund)
+          NATIVE_SERVER_DIR="$PWD/dist/runtime/server" node native/test/new-chat-start.mjs
 
       - name: Copy runtime into assets
         run: |

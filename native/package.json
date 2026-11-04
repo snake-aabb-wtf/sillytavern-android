@@ -8,7 +8,8 @@
     "capture:reference": "node test/capture-reference.mjs",
     "test:headless": "node test/build-headless.mjs",
     "test:custom-source": "node test/custom-source.mjs",
-    "test:new-chat": "node test/new-chat-start.mjs"
+    "test:new-chat": "node test/new-chat-start.mjs",
+    "test:unit": "node --test test/native-chat.test.mjs test/worker-recovery.mjs test/backend-preflight.test.mjs"
   },
   "dependencies": {
     "jsdom": "26.1.0"

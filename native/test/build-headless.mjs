@@ -179,6 +179,20 @@ async function main() {
     if (!fs.existsSync(REFERENCE_DIR)) {
         throw new Error(`No reference captures at ${REFERENCE_DIR}. Run "npm run capture:reference" first.`);
     }
+    if (CASES.length === 0) {
+        throw new Error('No parity cases are configured; a 0/0 PASS would hide every regression.');
+    }
+    const caseNames = new Set(CASES.map(caseSpec => caseSpec.name));
+    const orphanReferences = fs.readdirSync(REFERENCE_DIR)
+        .filter(file => file.endsWith('.json'))
+        .map(file => file.slice(0, -'.json'.length))
+        .filter(name => !caseNames.has(name));
+    if (orphanReferences.length > 0) {
+        throw new Error(
+            `Reference captures without a CASES entry: ${orphanReferences.join(', ')}. ` +
+            'Add them to CASES or remove them; otherwise their regressions are never checked.',
+        );
+    }
 
     let failures = 0;
     let totalMs = 0;
