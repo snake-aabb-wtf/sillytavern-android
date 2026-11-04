@@ -63,6 +63,14 @@ jobs:
         working-directory: native
         run: npm run test:custom-source
 
+      # A chat created by NewChatService has a header plus at most one greeting
+      # message (and no messages at all when the card has no greeting). The
+      # builder used to wait for a 2-message fixture chat, so the first send in
+      # a new chat hung for 60 s and failed. Both shapes must reach a body.
+      - name: Assert a fresh new-chat build reaches READY
+        working-directory: native
+        run: npm run test:new-chat
+
       # The step above runs against the unpruned checkout. Re-run the fixtures
       # against a copy pruned by the same script staging uses, so an asset that
       # jsdom actually needs cannot hide in webfonts/img/css/sounds and ship.

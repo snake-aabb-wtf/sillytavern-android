@@ -7,7 +7,8 @@
   "scripts": {
     "capture:reference": "node test/capture-reference.mjs",
     "test:headless": "node test/build-headless.mjs",
-    "test:custom-source": "node test/custom-source.mjs"
+    "test:custom-source": "node test/custom-source.mjs",
+    "test:new-chat": "node test/new-chat-start.mjs"
   },
   "dependencies": {
     "jsdom": "26.1.0"
