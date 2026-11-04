@@ -19,11 +19,23 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { chromium } from 'playwright';
-import { write as writeCharacterCard } from '../../SillyTavern/src/character-card-parser.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, '../..');
-const SERVER_DIR = path.join(REPO_ROOT, 'SillyTavern');
+
+// NATIVE_SERVER_DIR points the harness at the staged runtime (pruned, production
+// dependencies only) instead of the source checkout. The character-card parser
+// has to come from that same tree: its `png-chunks-extract` dependency lives in
+// the tree's node_modules, and the source checkout has none on a CI runner that
+// only staged the runtime.
+const rawServerDir = process.env.NATIVE_SERVER_DIR;
+const SERVER_DIR = rawServerDir
+    ? path.resolve(rawServerDir)
+    : path.join(REPO_ROOT, 'SillyTavern');
+const { write: writeCharacterCard } = await import(
+    pathToFileURL(path.join(SERVER_DIR, 'src/character-card-parser.js')).href,
+);
+
 export const FIXTURES_DIR = path.join(REPO_ROOT, '.github/ci/fixtures');
 const OUTPUT_DIR = path.join(REPO_ROOT, 'fixtures/reference');
 
