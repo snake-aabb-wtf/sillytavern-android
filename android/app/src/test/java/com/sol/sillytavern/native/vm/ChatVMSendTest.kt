@@ -5,7 +5,11 @@ import com.sol.sillytavern.native.data.model.Chat
 import com.sol.sillytavern.native.data.model.ChatMessage
 import com.sol.sillytavern.native.engine.ChatEvent
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.setMain
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.JsonArray
@@ -309,17 +313,14 @@ class ChatVMSendTest {
     }
 
     @Test
-    fun leavingWhileStreamingStillPersistsTheUserLine() = runTest {
-        // System back while a reply is streaming used to cancel the whole view
-        // model scope. The user's own line is real: it must reach the file even
-        // when the screen closes before the save finishes.
+    fun leavingBeforeTheStopSaveStartsStillPersistsTheUserLine() = runTest {
+        // A real back press pops the entry in the same frame as stop(): the save
+        // is still queued when ViewModel.onCleared() cancels viewModelScope. A
+        // plain child job is cancelled before it runs; the user's line is lost.
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
         val store = FakeStore(Chat(header, listOf(greeting)))
         var completed = false
-        val saveGate = CompletableDeferred<Unit>()
-        store.onSave = {
-            saveGate.await()
-            completed = true
-        }
+        store.onSave = { completed = true }
         val never = CompletableDeferred<Unit>()
         val vm = ChatVM(
             AVATAR,
@@ -333,11 +334,17 @@ class ChatVMSendTest {
             },
         )
 
+        // The initial load runs on the standard dispatcher too.
+        advanceUntilIdle()
         vm.send("Hi")
+        advanceUntilIdle()
+        assertTrue((vm.state.value as ChatUiState.Ready).streaming)
+
         vm.stop()
-        // What ViewModel.onCleared() does when the back stack pops the screen.
+        // What ViewModel.onCleared() does when the back stack pops the screen,
+        // before the queued save had a chance to start.
         vm.viewModelScope.cancel()
-        saveGate.complete(Unit)
+        advanceUntilIdle()
 
         assertTrue("the stop save must survive the screen closing", completed)
         assertTrue(

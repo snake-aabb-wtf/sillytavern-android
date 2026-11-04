@@ -79,6 +79,28 @@ class ChatsVMTest {
     }
 
     @Test
+    fun refreshPicksUpThePreviewWrittenByTheChatScreen() {
+        var preview = "old preview"
+        val vm = ChatsVM(
+            AVATAR,
+            ChatSource {
+                listOf(ChatSummary("a.jsonl", "Alpha", preview, 5L))
+            },
+            noCreator,
+        )
+        assertEquals("old preview", (vm.state.value as ChatsUiState.Ready).chats.single().lastMessage)
+
+        preview = "new reply"
+        vm.refresh()
+
+        assertEquals(
+            "returning from a chat must not leave the stale preview",
+            "new reply",
+            (vm.state.value as ChatsUiState.Ready).chats.single().lastMessage,
+        )
+    }
+
+    @Test
     fun aCreationFailureCarriesTheServerMessageNotJustTheStatus() {
         val vm = ChatsVM(
             AVATAR,

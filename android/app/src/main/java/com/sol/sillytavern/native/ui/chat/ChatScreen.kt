@@ -1,5 +1,6 @@
 package com.sol.sillytavern.native.ui.chat
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -65,8 +66,18 @@ fun ChatScreen(
     val ready = state as? ChatUiState.Ready
     val shownTitle = ready?.title?.takeIf { it.isNotBlank() } ?: title
 
+    // Leaving mid-turn used to cancel the view model scope with the user's line
+    // still only in memory. Every exit path stops first: stop() persists the user
+    // line in a NonCancellable job, so the pop and onCleared() cannot lose it.
+    val turnInFlight = ready != null && (ready.streaming || ready.finalizing)
+    val leave = {
+        if (turnInFlight) onStop()
+        onBack()
+    }
+    BackHandler(enabled = turnInFlight) { leave() }
+
     Scaffold(
-        topBar = { SolTopBar(shownTitle, onBack = onBack) },
+        topBar = { SolTopBar(shownTitle, onBack = leave) },
         bottomBar = {
             if (ready != null) {
                 Composer(

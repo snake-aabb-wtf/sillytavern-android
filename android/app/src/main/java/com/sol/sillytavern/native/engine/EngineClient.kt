@@ -1,6 +1,7 @@
 package com.sol.sillytavern.native.engine
 
 import java.io.IOException
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -78,9 +79,30 @@ class EngineClient(baseUrl: String, client: OkHttpClient = OkHttpClient()) {
     private var cachedToken: String? = null
     private val tokenLock = Mutex()
 
+    /**
+     * JSON calls: the prompt builder runs for `/api/chats/get` too, so a finite
+     * read deadline has to be generous (60 s), not OkHttp's 10 s default.
+     * Connect is loopback-only and must fail fast when Node is not up yet.
+     */
     private val http: OkHttpClient = client.newBuilder()
+        .connectTimeout(CONNECT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+        .readTimeout(JSON_READ_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+        .writeTimeout(JSON_WRITE_TIMEOUT_MS, TimeUnit.MILLISECONDS)
         .cookieJar(MemoryCookieJar())
         .addInterceptor(CsrfInterceptor())
+        .build()
+
+    /**
+     * Streaming calls: no read deadline at all.
+     *
+     * The server assembles the prompt and waits for the upstream provider before
+     * writing the first byte (11-12 s on a cold login, longer on a phone), and a
+     * slow model can pause mid-SSE for more than any fixed timeout. A cancelled
+     * turn still closes the socket through [awaitClose], so an idle stream does
+     * not leak; [stop] is the user's way out.
+     */
+    private val streamHttp: OkHttpClient = http.newBuilder()
+        .readTimeout(0, TimeUnit.MILLISECONDS)
         .build()
 
     /** The current CSRF token, fetching it once per session if necessary. */
@@ -129,13 +151,13 @@ class EngineClient(baseUrl: String, client: OkHttpClient = OkHttpClient()) {
             var terminal = false
             try {
                 token()
-                var call = newJsonCall(path, body)
+                var call = newJsonCall(path, body, streamHttp)
                 callRef.set(call)
                 var response = call.execute()
                 if (response.code == 403) {
                     response.close()
                     refreshToken()
-                    call = newJsonCall(path, body)
+                    call = newJsonCall(path, body, streamHttp)
                     callRef.set(call)
                     response = call.execute()
                     if (response.code == 403) {
@@ -236,12 +258,16 @@ class EngineClient(baseUrl: String, client: OkHttpClient = OkHttpClient()) {
     private fun executeJson(path: String, body: JsonElement): Response =
         newJsonCall(path, body).execute()
 
-    private fun newJsonCall(path: String, body: JsonElement): Call {
+    private fun newJsonCall(
+        path: String,
+        body: JsonElement,
+        client: OkHttpClient = http,
+    ): Call {
         val request = Request.Builder()
             .url(url(path))
             .post(body.toString().toByteArray(Charsets.UTF_8).toRequestBody(JSON))
             .build()
-        return http.newCall(request)
+        return client.newCall(request)
     }
 
     private fun url(path: String): String = "$root/${path.trimStart('/')}"
@@ -315,6 +341,9 @@ class EngineClient(baseUrl: String, client: OkHttpClient = OkHttpClient()) {
 
     private companion object {
         val JSON = "application/json; charset=utf-8".toMediaType()
+        const val CONNECT_TIMEOUT_MS = 2_000L
+        const val JSON_READ_TIMEOUT_MS = 60_000L
+        const val JSON_WRITE_TIMEOUT_MS = 60_000L
         const val MAX_TEXT_ERROR_BYTES = 200
         const val MAX_JSON_ERROR_BYTES = 64 * 1024
     }

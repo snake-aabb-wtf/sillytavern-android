@@ -6,13 +6,17 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Modifier
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
@@ -91,7 +95,10 @@ fun SolApp(port: Int, onFirstFrame: () -> Unit = {}) {
                         state = state,
                         avatarUrl = client::avatarUrl,
                         onCharacterClick = { character ->
-                            navController.navigate(Routes.chats(character.avatar))
+                            navController.navigate(Routes.chats(character.avatar)) {
+                                // A double tap must not stack two lists for one character.
+                                launchSingleTop = true
+                            }
                         },
                         onSettings = { navController.navigate(Routes.SETTINGS) },
                         onRetry = charactersVM::refresh,
@@ -133,12 +140,29 @@ fun SolApp(port: Int, onFirstFrame: () -> Unit = {}) {
                     val creating by chatsVM.creating.collectAsState()
                     val createError by chatsVM.createError.collectAsState()
                     val created by chatsVM.created.collectAsState()
+                    // The list is loaded once in `init`; coming back from a chat must
+                    // show the reply that was just written, not the preview from
+                    // before. The first resume is the entry's own load, so only
+                    // later resumes refresh.
+                    val lifecycleOwner = LocalLifecycleOwner.current
+                    val firstResume = remember { booleanArrayOf(true) }
+                    DisposableEffect(lifecycleOwner) {
+                        val observer = LifecycleEventObserver { _, event ->
+                            if (event == Lifecycle.Event.ON_RESUME) {
+                                if (firstResume[0]) firstResume[0] = false else chatsVM.refresh()
+                            }
+                        }
+                        lifecycleOwner.lifecycle.addObserver(observer)
+                        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+                    }
                     // One-shot event: consume before navigating so this entry does not
                     // reopen the same file on every recomposition.
                     LaunchedEffect(created) {
                         val file = created ?: return@LaunchedEffect
                         chatsVM.consumeCreated()
-                        navController.navigate(Routes.chat(avatar, file))
+                        navController.navigate(Routes.chat(avatar, file)) {
+                            launchSingleTop = true
+                        }
                     }
                     ChatsScreen(
                         title = characterName(avatar),
@@ -146,7 +170,11 @@ fun SolApp(port: Int, onFirstFrame: () -> Unit = {}) {
                         creating = creating,
                         createError = createError,
                         onChatClick = { chat ->
-                            navController.navigate(Routes.chat(avatar, chat.file))
+                            navController.navigate(Routes.chat(avatar, chat.file)) {
+                                // One destination per chat: two ChatVMs on one file
+                                // would each save their own snapshot.
+                                launchSingleTop = true
+                            }
                         },
                         onNewChat = chatsVM::newChat,
                         onDismissCreateError = chatsVM::dismissCreateError,

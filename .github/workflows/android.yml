@@ -2,9 +2,10 @@ name: Android
 
 # Push builds are artifact-only; tags st-sol-* additionally publish a Release.
 # The APK is the deliverable, so every push to the working branches must produce
-# one. No secrets are needed: the debug keystore is committed, headers come from a
-# public npm tarball, and libnode.so is a public Release asset built by
-# libnode-intl.yml.
+# one. Debug builds need no secrets (the debug keystore is committed, headers come
+# from a public npm tarball, libnode.so from a public Release). The release APK is
+# signed only when the RELEASE_KEYSTORE_* secrets exist; forks and pull requests
+# then skip it and keep the debug artifact instead of failing.
 
 on:
   push:
@@ -32,9 +33,15 @@ env:
 
 jobs:
   build:
-    name: Build debug APK
+    name: Build APKs
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    env:
+      # Secrets are not readable in a step-level `if`; this job env decides
+      # whether the release APK is signed. Pull requests from forks see "false".
+      HAS_RELEASE_KEYSTORE: ${{ secrets.RELEASE_KEYSTORE_BASE64 != '' }}
+    outputs:
+      release-apk: ${{ steps.release_apk.outputs.available }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -196,10 +203,63 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      # Gradle decodes RELEASE_KEYSTORE_BASE64 into $RUNNER_TEMP/release.keystore
+      # and signs with it; the secrets are only exposed to this step. Without
+      # them the step is skipped and only the debug APK is published.
+      - name: Build signed release APK
+        if: env.HAS_RELEASE_KEYSTORE == 'true'
+        working-directory: android
+        env:
+          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          RELEASE_KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+        run: ./gradlew verifyReleaseSigningConfig assembleRelease --no-daemon --stacktrace
+
+      - name: Verify release APK is signed, non-debuggable and complete
+        if: env.HAS_RELEASE_KEYSTORE == 'true'
+        run: |
+          set -euo pipefail
+          APK=android/app/build/outputs/apk/release/app-release.apk
+          test -s "$APK"
+          BUILD_TOOLS="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n 1)"
+          "$BUILD_TOOLS/aapt" dump badging "$APK" > /tmp/release-badging.txt
+          grep -q "package: name='com.sol.sillytavern'" /tmp/release-badging.txt
+          grep -q "sdkVersion:'26'" /tmp/release-badging.txt
+          grep -q "native-code: 'arm64-v8a'" /tmp/release-badging.txt
+          if grep -q "application-debuggable" /tmp/release-badging.txt; then
+            echo "release APK is debuggable" >&2
+            exit 1
+          fi
+          unzip -l "$APK" | grep -q 'lib/arm64-v8a/libnode.so'
+          unzip -l "$APK" | grep -q 'lib/arm64-v8a/libstbridge.so'
+          unzip -l "$APK" | grep -q 'assets/runtime.zip'
+          "$BUILD_TOOLS/apksigner" verify --print-certs "$APK" | tee /tmp/release-certs.txt
+          if grep -q "CN=Android Debug" /tmp/release-certs.txt; then
+            echo "release APK is signed with the debug certificate" >&2
+            exit 1
+          fi
+          ls -lh "$APK"
+
+      - name: Upload release APK
+        if: env.HAS_RELEASE_KEYSTORE == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release-apk
+          path: android/app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Mark release artifact availability
+        id: release_apk
+        if: env.HAS_RELEASE_KEYSTORE == 'true'
+        run: echo "available=true" >> "$GITHUB_OUTPUT"
+
   release:
     name: Publish Release
     needs: build
-    if: startsWith(github.ref, 'refs/tags/st-sol-')
+    # A tag build without signing secrets has no release artifact to publish.
+    if: startsWith(github.ref, 'refs/tags/st-sol-') && needs.build.outputs.release-apk == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -207,11 +267,11 @@ jobs:
       - name: Download APK
         uses: actions/download-artifact@v4
         with:
-          name: app-debug-apk
+          name: app-release-apk
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: app-debug.apk
+          files: app-release.apk
           fail_on_unmatched_files: true
           generate_release_notes: true

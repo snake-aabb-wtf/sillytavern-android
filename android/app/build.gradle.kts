@@ -15,6 +15,34 @@ val versionNameEnv = System.getenv("VERSION_NAME")?.takeIf { it.isNotBlank() }
     ?: "1.0.$versionCodeEnv"
 val runtimeVersion = System.getenv("RUNTIME_VERSION") ?: "dev"
 
+// Release signing is injected by CI from repository secrets. A fork or pull
+// request has none: the release build is then left unsigned instead of being
+// signed with the debug key (which would ship a publicly trusted certificate).
+val envReleaseKeystore = System.getenv("RELEASE_KEYSTORE_BASE64").orEmpty()
+val envReleaseStorePassword = System.getenv("RELEASE_KEYSTORE_PASSWORD").orEmpty()
+val envReleaseKeyAlias = System.getenv("RELEASE_KEY_ALIAS").orEmpty()
+val envReleaseKeyPassword = System.getenv("RELEASE_KEY_PASSWORD").orEmpty()
+val releaseSigningConfigured = listOf(
+    envReleaseKeystore,
+    envReleaseStorePassword,
+    envReleaseKeyAlias,
+    envReleaseKeyPassword,
+).all { it.isNotBlank() }
+
+// Decoded to RUNNER_TEMP in CI and to the build directory locally, never into
+// the source tree, and removed with the build output.
+val releaseKeystoreFile: File? = if (releaseSigningConfigured) {
+    val target = File(
+        System.getenv("RUNNER_TEMP")?.takeIf { it.isNotBlank() } ?: layout.buildDirectory.get().asFile.path,
+        "release.keystore",
+    )
+    target.parentFile?.mkdirs()
+    target.writeBytes(java.util.Base64.getDecoder().decode(envReleaseKeystore.trim()))
+    target
+} else {
+    null
+}
+
 android {
     namespace = "com.sol.sillytavern"
     compileSdk = 35
@@ -49,6 +77,14 @@ android {
             keyAlias = "androiddebugkey"
             keyPassword = "android"
         }
+        if (releaseKeystoreFile != null) {
+            create("release") {
+                storeFile = releaseKeystoreFile
+                storePassword = envReleaseStorePassword
+                keyAlias = envReleaseKeyAlias
+                keyPassword = envReleaseKeyPassword
+            }
+        }
     }
 
     buildTypes {
@@ -56,8 +92,13 @@ android {
             signingConfig = signingConfigs.getByName("debug")
         }
         release {
+            // A release APK must never be a debuggable build: it would expose
+            // the WebView and the local Node server to any adb client.
+            isDebuggable = false
             isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("debug")
+            // Null when the secrets are absent (fork/PR): the APK stays unsigned
+            // rather than carrying the debug certificate.
+            signingConfig = signingConfigs.findByName("release")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
@@ -101,6 +142,8 @@ dependencies {
     // Compose 1.7.x (navigation 2.8) and lifecycle 2.8.7 used above.
     implementation("androidx.navigation:navigation-compose:2.8.4")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
+    // LocalLifecycleOwner + lifecycle observers inside Compose (chat-list resume refresh).
+    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
     // Coil 2.7 is built on the same OkHttp 4.12 line as the engine client, so the
@@ -118,4 +161,28 @@ dependencies {
     testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
     // setMain() lets the view model tests run the real viewModelScope on the JVM.
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
+}
+
+/**
+ * Fails the build when the release variant stops being non-debuggable, or when
+ * CI supplied a keystore that did not reach the signing config. Runs before
+ * `assembleRelease` in CI (`verifyReleaseSigningConfig assembleRelease`).
+ */
+tasks.register("verifyReleaseSigningConfig") {
+    doLast {
+        val release = android.buildTypes.getByName("release")
+        check(!release.isDebuggable) { "release build type must not be debuggable" }
+        if (releaseSigningConfigured) {
+            check(release.signingConfig != null) {
+                "RELEASE_KEYSTORE_BASE64 is set but the release signing config is missing"
+            }
+            check(!release.signingConfig!!.storeFile!!.path.contains("debug.keystore")) {
+                "release must not be signed with the debug keystore"
+            }
+        } else {
+            logger.lifecycle(
+                "release signing secrets are absent; assembleRelease will produce an unsigned APK",
+            )
+        }
+    }
 }

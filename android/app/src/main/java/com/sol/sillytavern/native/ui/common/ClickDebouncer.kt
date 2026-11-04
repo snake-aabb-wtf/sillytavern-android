@@ -12,7 +12,12 @@ internal class ClickDebouncer(private val windowMillis: Long = DEFAULT_WINDOW_MS
     private var lastAccepted: Long? = null
 
     /** True when a tap at [nowMillis] is far enough from the previously accepted one. */
-    fun shouldAccept(nowMillis: Long): Boolean = true
+    fun shouldAccept(nowMillis: Long): Boolean {
+        val previous = lastAccepted
+        if (previous != null && nowMillis - previous < windowMillis) return false
+        lastAccepted = nowMillis
+        return true
+    }
 
     companion object {
         const val DEFAULT_WINDOW_MS = 300L

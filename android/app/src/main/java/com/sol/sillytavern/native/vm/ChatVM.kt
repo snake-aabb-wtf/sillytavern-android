@@ -175,8 +175,11 @@ class ChatVM(
 
         // The user's line already exists and must survive the screen; the stopped
         // fragment is filtered out by [persisted]. This runs in its own job because
-        // stop() must return immediately.
-        viewModelScope.launch { reportSaveFailure(persistLatest()) }
+        // stop() must return immediately, and the job is [NonCancellable] because
+        // the screen pops right after stop(): ViewModel.onCleared() cancels
+        // viewModelScope, and a plain child job would be cancelled before the
+        // write reached disk.
+        viewModelScope.launch(NonCancellable) { reportSaveFailure(persistLatest()) }
     }
 
     internal suspend fun load() {
@@ -322,17 +325,21 @@ class ChatVM(
      * the write failed, null on success. The save is [NonCancellable]: leaving the
      * screen must not leave a half-written chat file behind.
      */
-    private suspend fun persistLatest(): String? = saveLock.withLock {
-        val ready = _state.value as? ChatUiState.Ready ?: return@withLock null
-        try {
-            withContext(NonCancellable) {
+    private suspend fun persistLatest(): String? = withContext(NonCancellable) {
+        // The whole block is NonCancellable, not just the `store.save` call:
+        // `saveLock.withLock` can be cancelled while it is *waiting*, and a save
+        // queued behind another writer (a stop followed by a completed turn) must
+        // still land after the screen is gone.
+        saveLock.withLock {
+            val ready = _state.value as? ChatUiState.Ready ?: return@withLock null
+            try {
                 store.save(Chat(currentHeader(), ready.messages.persisted()))
+                null
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                failureText(error)
             }
-            null
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (error: Throwable) {
-            failureText(error)
         }
     }
 

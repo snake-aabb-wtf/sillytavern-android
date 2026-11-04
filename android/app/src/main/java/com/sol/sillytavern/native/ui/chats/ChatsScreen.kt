@@ -1,5 +1,6 @@
 package com.sol.sillytavern.native.ui.chats
 
+import android.os.SystemClock
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -29,6 +30,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.sol.sillytavern.native.data.model.ChatSummary
+import com.sol.sillytavern.native.ui.common.ClickDebouncer
 import com.sol.sillytavern.native.ui.common.ErrorState
 import com.sol.sillytavern.native.ui.common.LoadingState
 import com.sol.sillytavern.native.ui.common.SolTopBar
@@ -58,6 +60,9 @@ fun ChatsScreen(
     onBack: () -> Unit,
 ) {
     val snackbarHostState = remember { SnackbarHostState() }
+    // A fast double tap on a row would push the same chat twice; two ChatVMs on
+    // one file then overwrite each other's snapshot on save.
+    val rowDebouncer = remember { ClickDebouncer() }
     // A creation failure is reported beside the list, not instead of it: the existing
     // chats are still readable and the button stays available for a retry.
     LaunchedEffect(createError) {
@@ -94,7 +99,14 @@ fun ChatsScreen(
             )
             is ChatsUiState.Ready -> LazyColumn(modifier = contentModifier) {
                 items(state.chats, key = { it.file }) { chat ->
-                    ChatRow(chat = chat, onClick = { onChatClick(chat) })
+                    ChatRow(
+                        chat = chat,
+                        onClick = {
+                            if (rowDebouncer.shouldAccept(SystemClock.uptimeMillis())) {
+                                onChatClick(chat)
+                            }
+                        },
+                    )
                     HorizontalDivider()
                 }
             }

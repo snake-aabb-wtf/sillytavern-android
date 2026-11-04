@@ -115,6 +115,35 @@ class SettingsVM(private val repository: SettingsStore) : ViewModel() {
 
         _state.value = current.copy(saving = true, saved = false, error = null)
         saveJob = viewModelScope.launch {
+            // Switching the preset switches the secret key name with it. A blank
+            // field only means "keep the stored key" when that provider actually
+            // has one; otherwise the save would report 已保存 for a provider that
+            // cannot make a single request. CUSTOM is exempt: a local endpoint may
+            // legitimately need no key (`openai.js:6047`).
+            if (current.apiKey.isNullOrBlank() && current.config.provider != ChatProvider.CUSTOM) {
+                val stored = try {
+                    repository.hasApiKey(current.config.provider)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Throwable) {
+                    val now = _state.value as? SettingsUiState.Ready ?: return@launch
+                    _state.value = now.copy(
+                        saving = false,
+                        saved = false,
+                        error = failureText(error),
+                    )
+                    return@launch
+                }
+                if (!stored) {
+                    val now = _state.value as? SettingsUiState.Ready ?: return@launch
+                    _state.value = now.copy(
+                        saving = false,
+                        saved = false,
+                        error = "请填写 API Key",
+                    )
+                    return@launch
+                }
+            }
             try {
                 repository.save(current.config, current.apiKey)
             } catch (cancelled: CancellationException) {
