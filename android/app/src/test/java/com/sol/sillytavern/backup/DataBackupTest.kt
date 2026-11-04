@@ -95,7 +95,7 @@ class DataBackupTest {
             entries.any { it.endsWith("secrets.json") },
         )
         assertTrue(entries.contains("default-user/settings.json"))
-        assertTrue(entries.contains("default-user/characters/Seraphina.png"))
+        assertTrue(entries.contains("characters/Seraphina.png"))
         assertTrue(entries.contains("config.yaml"))
         assertEquals(3, count)
 
