@@ -18,7 +18,10 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-import { chromium } from 'playwright';
+// Playwright is imported lazily, inside captureCase(): only the browser capture
+// needs it. The headless builder tests (custom-source, new-chat-start) import
+// this module just for prepareDataRoot and must run on the Node 18 runtime the
+// APK ships, while Playwright itself requires Node 20+.
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, '../..');
@@ -266,7 +269,7 @@ async function captureCase(caseSpec) {
     try {
         await waitForServer(child, logs, serverUrl);
 
-        browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
+        browser = await (await import('playwright')).chromium.launch({ headless: true, args: ['--no-sandbox'] });
         const context = await browser.newContext();
         const page = await context.newPage();
         const pageErrors = [];
