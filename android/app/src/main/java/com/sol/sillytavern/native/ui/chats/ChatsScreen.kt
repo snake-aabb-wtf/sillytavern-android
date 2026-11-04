@@ -1,5 +1,6 @@
 package com.sol.sillytavern.native.ui.chats
 
+import android.os.SystemClock
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -29,6 +30,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.sol.sillytavern.native.data.model.ChatSummary
+import com.sol.sillytavern.native.ui.common.ClickDebouncer
 import com.sol.sillytavern.native.ui.common.ErrorState
 import com.sol.sillytavern.native.ui.common.LoadingState
 import com.sol.sillytavern.native.ui.common.SolTopBar
@@ -126,6 +128,10 @@ private fun NewChatEmpty(creating: Boolean, onNewChat: () -> Unit, modifier: Mod
 
 @Composable
 private fun ChatRow(chat: ChatSummary, onClick: () -> Unit) {
+    // One debounce window per chat: a shared one would swallow a legitimate tap
+    // on another row inside 300 ms. A fast double tap on *this* row would push
+    // the same destination twice and leave two ChatVMs overwriting one file.
+    val debouncer = remember(chat.file) { ClickDebouncer() }
     val preview = chat.lastMessage.takeIf { it.isNotBlank() }
     // Declared as a composable slot: a lambda inside `let` would not infer that type.
     val previewContent: (@Composable () -> Unit)? = if (preview != null) {
@@ -155,7 +161,9 @@ private fun ChatRow(chat: ChatSummary, onClick: () -> Unit) {
                 )
             }
         },
-        modifier = Modifier.clickable(onClick = onClick),
+        modifier = Modifier.clickable {
+            if (debouncer.shouldAccept(SystemClock.uptimeMillis())) onClick()
+        },
     )
 }
 

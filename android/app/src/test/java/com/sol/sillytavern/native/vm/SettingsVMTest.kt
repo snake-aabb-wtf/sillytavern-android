@@ -116,6 +116,87 @@ class SettingsVMTest {
         assertEquals("the user should not have to paste the key again", "sk-custom", ready.apiKey)
     }
 
+    @Test
+    fun aProviderWithoutAStoredKeyAndABlankFieldIsRejected() {
+        for (provider in listOf(ChatProvider.OPENAI, ChatProvider.OPENROUTER)) {
+            val config = ProviderConfig(
+                provider = provider,
+                openRouterModel = "openai/gpt-4o-mini",
+                openAiModel = "gpt-4o-mini",
+            )
+            val store = FakeStore(config, hasStoredKey = false)
+            val vm = SettingsVM(store)
+
+            vm.save()
+
+            val ready = vm.state.value as SettingsUiState.Ready
+            assertFalse("$provider must not report 已保存 without a key", ready.saved)
+            assertTrue(
+                "$provider must ask for the key: ${ready.error}",
+                ready.error!!.contains("API Key"),
+            )
+            assertNull("nothing may be written for $provider", store.saved)
+            assertEquals("the stored-key state must be consulted once", 1, store.keyChecks)
+        }
+    }
+
+    @Test
+    fun anExistingStoredKeyIsEnoughAfterSwitchingProvider() {
+        for (provider in listOf(ChatProvider.OPENAI, ChatProvider.OPENROUTER)) {
+            val config = ProviderConfig(
+                provider = provider,
+                openRouterModel = "openai/gpt-4o-mini",
+                openAiModel = "gpt-4o-mini",
+            )
+            val store = FakeStore(config, hasStoredKey = true)
+            val vm = SettingsVM(store)
+
+            vm.save()
+
+            val ready = vm.state.value as SettingsUiState.Ready
+            assertTrue("$provider has a key on the server and must save", ready.saved)
+            assertNull(ready.error)
+            assertEquals("", ready.apiKey)
+        }
+    }
+
+    @Test
+    fun aCustomEndpointMaySaveWithoutAKey() {
+        val store = FakeStore(
+            ProviderConfig(
+                provider = ChatProvider.CUSTOM,
+                baseUrl = "http://127.0.0.1:5000/v1",
+                customModel = "local",
+            ),
+            hasStoredKey = false,
+        )
+        val vm = SettingsVM(store)
+
+        vm.save()
+
+        val ready = vm.state.value as SettingsUiState.Ready
+        assertTrue("CUSTOM is allowed to have no key", ready.saved)
+        assertNull(ready.error)
+        assertEquals("CUSTOM must not be blocked by a key lookup", 0, store.keyChecks)
+    }
+
+    @Test
+    fun aTypedKeyIsSavedWithoutALookup() {
+        val store = FakeStore(
+            ProviderConfig(provider = ChatProvider.OPENAI, openAiModel = "gpt-4o-mini"),
+            hasStoredKey = false,
+        )
+        val vm = SettingsVM(store)
+        vm.setApiKey("sk-openai")
+
+        vm.save()
+
+        val ready = vm.state.value as SettingsUiState.Ready
+        assertTrue(ready.saved)
+        assertEquals("a typed key needs no server read", 0, store.keyChecks)
+        assertEquals("sk-openai", store.saved?.second)
+    }
+
     private class FakeStore(
         private val loaded: ProviderConfig = ProviderConfig(
             provider = ChatProvider.CUSTOM,
@@ -124,14 +205,21 @@ class SettingsVMTest {
         ),
         var loadError: Throwable? = null,
         var saveError: Throwable? = null,
+        var hasStoredKey: Boolean = true,
     ) : SettingsStore {
         var saved: Pair<ProviderConfig, String?>? = null
+        var keyChecks = 0
 
         override suspend fun load(): ProviderConfig = loadError?.let { throw it } ?: loaded
 
         override suspend fun save(config: ProviderConfig, apiKey: String?) {
             saveError?.let { throw it }
             saved = config to apiKey
+        }
+
+        override suspend fun hasApiKey(provider: ChatProvider): Boolean {
+            keyChecks++
+            return hasStoredKey
         }
     }
 }

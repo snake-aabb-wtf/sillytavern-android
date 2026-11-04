@@ -56,6 +56,13 @@ object DataBackup {
     /** A backup without this file is not a SillyTavern data directory. */
     private const val REQUIRED_IMPORT_FILE = "default-user/settings.json"
 
+    /**
+     * Plaintext provider keys. Exporting them would put secrets in a file the UI
+     * describes as "chats, character cards and settings" and that users share;
+     * import keeps the target device's own file instead.
+     */
+    private const val SECRETS_ENTRY = "default-user/secrets.json"
+
     private const val BUFFER_SIZE = 64 * 1024
     private const val NAME_TIMESTAMP_PATTERN = "yyyyMMdd-HHmm"
 
@@ -95,21 +102,9 @@ object DataBackup {
 
         val temp = File(context.cacheDir, "sillytavern-export-${System.currentTimeMillis()}.zip")
         return try {
-            var files = 0
-            val emitted = mutableSetOf<String>()
-            FileOutputStream(temp).use { fileOut ->
+            val files = FileOutputStream(temp).use { fileOut ->
                 ZipOutputStream(BufferedOutputStream(fileOut, BUFFER_SIZE)).use { zip ->
-                    val config = File(context.filesDir, CONFIG_NAME)
-                    if (config.isFile) {
-                        emitted.add(CONFIG_NAME)
-                        zip.putNextEntry(ZipEntry(CONFIG_NAME))
-                        config.inputStream().buffered(BUFFER_SIZE).use {
-                            it.copyTo(zip, BUFFER_SIZE)
-                        }
-                        zip.closeEntry()
-                        files++
-                    }
-                    files += addDirectory(zip, dataDir, dataDir, emitted)
+                    writeArchive(dataDir, File(context.filesDir, CONFIG_NAME), zip)
                 }
             }
 
@@ -127,6 +122,29 @@ object DataBackup {
         } finally {
             temp.delete()
         }
+    }
+
+    /**
+     * Writes the export tree into [zip]: the root config first, then the data
+     * directory. Split out from [export] so the entry selection (notably the
+     * secrets exclusion) is testable on the JVM without a ContentResolver.
+     *
+     * Returns the number of files written.
+     */
+    internal fun writeArchive(dataDir: File, rootConfig: File?, zip: ZipOutputStream): Int {
+        var files = 0
+        val emitted = mutableSetOf<String>()
+        if (rootConfig != null && rootConfig.isFile) {
+            emitted.add(CONFIG_NAME)
+            zip.putNextEntry(ZipEntry(CONFIG_NAME))
+            rootConfig.inputStream().buffered(BUFFER_SIZE).use {
+                it.copyTo(zip, BUFFER_SIZE)
+            }
+            zip.closeEntry()
+            files++
+        }
+        files += addDirectory(zip, dataDir, dataDir, emitted)
+        return files
     }
 
     /**
@@ -162,6 +180,9 @@ object DataBackup {
                     files += addDirectory(zip, base, child, emitted)
                 }
                 child.isFile -> {
+                    // Never export plaintext provider keys, even though they live
+                    // inside the data directory the archive mirrors.
+                    if (name == SECRETS_ENTRY) continue
                     if (!emitted.add(name)) {
                         Log.w(TAG, "skipping duplicate entry $name")
                         continue
@@ -233,6 +254,16 @@ object DataBackup {
                     }
                     zip.closeEntry()
                 }
+            }
+
+            // The export never carries keys, and an archive from an older build
+            // might: the target device's own secrets file always wins, so an
+            // import does not silently wipe the keys the user just configured.
+            val liveSecrets = File(filesDir, "$DATA_DIR_NAME/$SECRETS_ENTRY")
+            if (liveSecrets.isFile) {
+                val stagedSecrets = File(staging, SECRETS_ENTRY)
+                stagedSecrets.parentFile?.mkdirs()
+                liveSecrets.copyTo(stagedSecrets, overwrite = true)
             }
 
             if (!File(staging, REQUIRED_IMPORT_FILE).isFile) {

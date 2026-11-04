@@ -31,7 +31,7 @@
     <string name="settings_title">设置</string>
     <string name="settings_open">设置</string>
     <string name="settings_data_title">数据备份</string>
-    <string name="settings_data_description">导出会把聊天记录、角色卡与设置打包成一个 zip 文件。导入的数据只会在下次启动应用时生效，届时当前数据会被替换。</string>
+    <string name="settings_data_description">导出会把聊天记录、角色卡与设置打包成一个 zip 文件（不包含已保存的 API Key）。导入的数据只会在下次启动应用时生效，届时当前数据会被替换。</string>
     <string name="settings_export">导出数据</string>
     <string name="settings_import">导入数据</string>
     <string name="settings_exporting">正在导出数据…</string>

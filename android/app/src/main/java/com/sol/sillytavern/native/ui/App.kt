@@ -36,6 +36,9 @@ import com.sol.sillytavern.native.vm.ChatVM
 import com.sol.sillytavern.native.vm.ChatsVM
 import com.sol.sillytavern.native.vm.NewChatCreator
 import com.sol.sillytavern.native.vm.SettingsVM
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.map
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 
@@ -91,7 +94,10 @@ fun SolApp(port: Int, onFirstFrame: () -> Unit = {}) {
                         state = state,
                         avatarUrl = client::avatarUrl,
                         onCharacterClick = { character ->
-                            navController.navigate(Routes.chats(character.avatar))
+                            navController.navigate(Routes.chats(character.avatar)) {
+                                // A double tap must not stack two lists for one character.
+                                launchSingleTop = true
+                            }
                         },
                         onSettings = { navController.navigate(Routes.SETTINGS) },
                         onRetry = charactersVM::refresh,
@@ -138,7 +144,9 @@ fun SolApp(port: Int, onFirstFrame: () -> Unit = {}) {
                     LaunchedEffect(created) {
                         val file = created ?: return@LaunchedEffect
                         chatsVM.consumeCreated()
-                        navController.navigate(Routes.chat(avatar, file))
+                        navController.navigate(Routes.chat(avatar, file)) {
+                            launchSingleTop = true
+                        }
                     }
                     ChatsScreen(
                         title = characterName(avatar),
@@ -146,7 +154,11 @@ fun SolApp(port: Int, onFirstFrame: () -> Unit = {}) {
                         creating = creating,
                         createError = createError,
                         onChatClick = { chat ->
-                            navController.navigate(Routes.chat(avatar, chat.file))
+                            navController.navigate(Routes.chat(avatar, chat.file)) {
+                                // One destination per chat: two ChatVMs on one file
+                                // would each save their own snapshot.
+                                launchSingleTop = true
+                            }
                         },
                         onNewChat = chatsVM::newChat,
                         onDismissCreateError = chatsVM::dismissCreateError,
@@ -202,6 +214,13 @@ private class SolClient(port: Int) {
     val characters = CharacterSource { characterRepository.list() }
     val chats = ChatSource { avatar -> chatRepository.list(avatar) }
 
+    /**
+     * Avatar names whose chat file was just written. A list entry on the back
+     * stack has no composition while a chat is on top, so it cannot refresh on
+     * resume; the view model collects this instead and reloads its preview.
+     */
+    private val chatSaved = MutableSharedFlow<String>(extraBufferCapacity = 16)
+
     private val newChatService = NewChatService(characterRepository, chatRepository)
 
     fun settingsVMFactory(): ViewModelProvider.Factory = SettingsVM.of(settingsRepository)
@@ -211,6 +230,7 @@ private class SolClient(port: Int) {
         avatar = avatar,
         source = chats,
         creator = NewChatCreator { name -> newChatService.create(avatar, name) },
+        signals = chatSaved.filter { it == avatar }.map { },
     )
 
     /**
@@ -230,7 +250,13 @@ private class SolClient(port: Int) {
                 },
             )
         }
-        return ChatVM.of(avatar, file, chatRepository, turn)
+        return ChatVM.of(
+            avatar,
+            file,
+            chatRepository,
+            turn,
+            onSaved = { chatSaved.tryEmit(avatar) },
+        )
     }
 
     /**

@@ -1,3 +1,5 @@
+import java.util.Base64
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -14,6 +16,35 @@ val versionCodeEnv = (System.getenv("VERSION_CODE") ?: "1000").toInt()
 val versionNameEnv = System.getenv("VERSION_NAME")?.takeIf { it.isNotBlank() }
     ?: "1.0.$versionCodeEnv"
 val runtimeVersion = System.getenv("RUNTIME_VERSION") ?: "dev"
+
+// Release signing is injected by CI from repository secrets. A fork or pull
+// request has none: the release build is then left unsigned instead of being
+// signed with the debug key (which would ship a publicly trusted certificate).
+val envReleaseKeystore = System.getenv("RELEASE_KEYSTORE_BASE64").orEmpty()
+val envReleaseStorePassword = System.getenv("RELEASE_KEYSTORE_PASSWORD").orEmpty()
+val envReleaseKeyAlias = System.getenv("RELEASE_KEY_ALIAS").orEmpty()
+val envReleaseKeyPassword = System.getenv("RELEASE_KEY_PASSWORD").orEmpty()
+val releaseSigningConfigured = listOf(
+    envReleaseKeystore,
+    envReleaseStorePassword,
+    envReleaseKeyAlias,
+    envReleaseKeyPassword,
+).all { it.isNotBlank() }
+
+// Decoded to $RUNNER_TEMP in CI (a throwaway runner directory, discarded with the
+// job) or to the build directory locally (removed by `clean`); never into the
+// source tree and never committed.
+val releaseKeystoreFile: File? = if (releaseSigningConfigured) {
+    val target = File(
+        System.getenv("RUNNER_TEMP")?.takeIf { it.isNotBlank() } ?: layout.buildDirectory.get().asFile.path,
+        "release.keystore",
+    )
+    target.parentFile?.mkdirs()
+    target.writeBytes(Base64.getDecoder().decode(envReleaseKeystore.trim()))
+    target
+} else {
+    null
+}
 
 android {
     namespace = "com.sol.sillytavern"
@@ -49,6 +80,14 @@ android {
             keyAlias = "androiddebugkey"
             keyPassword = "android"
         }
+        if (releaseKeystoreFile != null) {
+            create("release") {
+                storeFile = releaseKeystoreFile
+                storePassword = envReleaseStorePassword
+                keyAlias = envReleaseKeyAlias
+                keyPassword = envReleaseKeyPassword
+            }
+        }
     }
 
     buildTypes {
@@ -56,8 +95,13 @@ android {
             signingConfig = signingConfigs.getByName("debug")
         }
         release {
+            // A release APK must never be a debuggable build: it would expose
+            // the WebView and the local Node server to any adb client.
+            isDebuggable = false
             isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("debug")
+            // Null when the secrets are absent (fork/PR): the APK stays unsigned
+            // rather than carrying the debug certificate.
+            signingConfig = signingConfigs.findByName("release")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
@@ -118,4 +162,28 @@ dependencies {
     testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
     // setMain() lets the view model tests run the real viewModelScope on the JVM.
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
+}
+
+/**
+ * Fails the build when the release variant stops being non-debuggable, or when
+ * CI supplied a keystore that did not reach the signing config. Runs before
+ * `assembleRelease` in CI (`verifyReleaseSigningConfig assembleRelease`).
+ */
+val verifiedRelease = android.buildTypes.getByName("release")
+tasks.register("verifyReleaseSigningConfig") {
+    doLast {
+        check(!verifiedRelease.isDebuggable) { "release build type must not be debuggable" }
+        if (releaseSigningConfigured) {
+            check(verifiedRelease.signingConfig != null) {
+                "RELEASE_KEYSTORE_BASE64 is set but the release signing config is missing"
+            }
+            check(!verifiedRelease.signingConfig!!.storeFile!!.path.contains("debug.keystore")) {
+                "release must not be signed with the debug keystore"
+            }
+        } else {
+            logger.lifecycle(
+                "release signing secrets are absent; assembleRelease will produce an unsigned APK",
+            )
+        }
+    }
 }

@@ -119,6 +119,29 @@ class EngineStreamTest {
     }
 
     @Test
+    fun streamWaitsPastTheDefaultReadTimeoutForTheFirstByte() = runBlocking {
+        // Prompt assembly on a cold login takes 11-12 s before the server writes
+        // anything. OkHttp's default 10 s read timeout turns that into a failed
+        // first turn; the streaming client must have no read deadline at all.
+        val tokens = AtomicInteger()
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = when (request.path) {
+                "/csrf-token" -> token(tokens)
+                "/api/chat" -> sse(hiChunk, doneFrame)
+                    .setHeadersDelay(15, TimeUnit.SECONDS)
+                else -> MockResponse().setResponseCode(404)
+            }
+        }
+        val client = EngineClient(server.url("/").toString())
+
+        val events = withTimeout(LONG_TIMEOUT_MS) {
+            client.stream("/api/chat", buildJsonObject { }).toList()
+        }
+
+        assertEquals(listOf<ChatEvent>(ChatEvent.Delta("Hi"), ChatEvent.Done), events)
+    }
+
+    @Test
     fun errorFrameEmitsFailure() = runBlocking {
         val client = serveStream(sseResponse("event: error\ndata: {\"error\":\"upstream exploded\"}\n\n"))
 
@@ -275,6 +298,7 @@ class EngineStreamTest {
 
     private companion object {
         const val TIMEOUT_MS = 5_000L
+        const val LONG_TIMEOUT_MS = 30_000L
         const val hiChunk = "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\n"
         const val doneFrame = "data: [DONE]\n\n"
     }

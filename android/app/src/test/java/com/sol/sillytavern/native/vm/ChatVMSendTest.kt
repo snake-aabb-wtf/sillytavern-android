@@ -1,9 +1,15 @@
 package com.sol.sillytavern.native.vm
 
+import androidx.lifecycle.viewModelScope
 import com.sol.sillytavern.native.data.model.Chat
 import com.sol.sillytavern.native.data.model.ChatMessage
 import com.sol.sillytavern.native.engine.ChatEvent
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.setMain
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.JsonArray
@@ -287,6 +293,75 @@ class ChatVMSendTest {
     }
 
     @Test
+    fun aSuccessfulTurnSignalsTheChatList() = runTest {
+        var signals = 0
+        val store = FakeStore(Chat(header, listOf(greeting)))
+        val vm = ChatVM(
+            AVATAR,
+            FILE,
+            store,
+            ChatTurn {
+                flow {
+                    emit(ChatEvent.Delta("Hello"))
+                    emit(ChatEvent.Done)
+                }
+            },
+            onSaved = { signals++ },
+        )
+
+        vm.send("Hi")
+
+        assertEquals("the list must learn about the new preview", 1, signals)
+    }
+
+    @Test
+    fun aStopSaveAlsoSignalsTheChatList() = runTest {
+        var signals = 0
+        val store = FakeStore(Chat(header, listOf(greeting)))
+        val never = CompletableDeferred<Unit>()
+        val vm = ChatVM(
+            AVATAR,
+            FILE,
+            store,
+            ChatTurn {
+                flow {
+                    emit(ChatEvent.Delta("Hel"))
+                    never.await()
+                }
+            },
+            onSaved = { signals++ },
+        )
+
+        vm.send("Hi")
+        vm.stop()
+
+        assertEquals("the persisted user line changes the preview too", 1, signals)
+    }
+
+    @Test
+    fun aFailedSaveDoesNotSignalTheChatList() = runTest {
+        var signals = 0
+        val store = FakeStore(Chat(header, listOf(greeting)))
+        store.onSave = { throw RuntimeException("disk full") }
+        val vm = ChatVM(
+            AVATAR,
+            FILE,
+            store,
+            ChatTurn {
+                flow {
+                    emit(ChatEvent.Delta("Hello"))
+                    emit(ChatEvent.Done)
+                }
+            },
+            onSaved = { signals++ },
+        )
+
+        vm.send("Hi")
+
+        assertEquals("nothing was written, so nothing may refresh", 0, signals)
+    }
+
+    @Test
     fun aNewChatSavesARealHeaderInsteadOfAnEmptyObject() = runTest {
         // `/api/chats/get` answers [] for a chat that does not exist yet; the
         // repository surfaces that as an empty metadata object. Writing `{}` back
@@ -304,6 +379,96 @@ class ChatVMSendTest {
             ?.content
             .orEmpty()
         assertTrue("a new chat needs an integrity slug", integrity.isNotBlank())
+    }
+
+    @Test
+    fun leavingBeforeTheStopSaveStartsStillPersistsTheUserLine() = runTest {
+        // A real back press pops the entry in the same frame as stop(): the save
+        // is still queued when ViewModel.onCleared() cancels viewModelScope. A
+        // plain child job is cancelled before it runs; the user's line is lost.
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        val store = FakeStore(Chat(header, listOf(greeting)))
+        var completed = false
+        store.onSave = { completed = true }
+        val never = CompletableDeferred<Unit>()
+        val vm = ChatVM(
+            AVATAR,
+            FILE,
+            store,
+            ChatTurn {
+                flow {
+                    emit(ChatEvent.Delta("Hel"))
+                    never.await()
+                }
+            },
+        )
+
+        // The initial load runs on the standard dispatcher too.
+        advanceUntilIdle()
+        vm.send("Hi")
+        advanceUntilIdle()
+        assertTrue((vm.state.value as ChatUiState.Ready).streaming)
+
+        vm.stop()
+        // What ViewModel.onCleared() does when the back stack pops the screen,
+        // before the queued save had a chance to start.
+        vm.viewModelScope.cancel()
+        advanceUntilIdle()
+
+        assertTrue("the stop save must survive the screen closing", completed)
+        assertTrue(
+            "the user's line must be on disk: ${store.saves.map { it.texts() }}",
+            store.saves.any { it.texts().contains("Hi") },
+        )
+    }
+
+    @Test
+    fun aSaveWaitingForTheLockSurvivesTheScreenClosing() = runTest {
+        // `saveLock.withLock` can be cancelled while it is *waiting*. A completed
+        // reply whose write is queued behind the stop-save must still land after
+        // the screen is gone.
+        val store = FakeStore(Chat(header, listOf(greeting)))
+        var saveCalls = 0
+        var secondCompleted = false
+        val firstSaveGate = CompletableDeferred<Unit>()
+        store.onSave = {
+            saveCalls++
+            if (saveCalls == 1) {
+                firstSaveGate.await()
+            } else {
+                secondCompleted = true
+            }
+        }
+        val turnGate = CompletableDeferred<Unit>()
+        val vm = ChatVM(
+            AVATAR,
+            FILE,
+            store,
+            ChatTurn { input ->
+                flow {
+                    if (input == "Hi") {
+                        emit(ChatEvent.Delta("Hel"))
+                        turnGate.await()
+                    } else {
+                        emit(ChatEvent.Delta("Answer"))
+                        emit(ChatEvent.Done)
+                    }
+                }
+            },
+        )
+
+        vm.send("Hi")
+        vm.stop() // first save holds the lock and waits on the gate
+        vm.send("Next") // its Done save queues behind that lock
+        vm.viewModelScope.cancel()
+        firstSaveGate.complete(Unit)
+
+        assertTrue("a save cancelled while waiting for the lock must still run", secondCompleted)
+        assertEquals(2, store.saves.size)
+        assertEquals(
+            listOf("Hello there.", "Hi", "Next", "Answer"),
+            store.saves.last().texts(),
+        )
     }
 
     private fun doneVm(store: ChatStore, reply: String): ChatVM = ChatVM(

@@ -8,9 +8,11 @@ import androidx.lifecycle.viewmodel.viewModelFactory
 import com.sol.sillytavern.native.data.model.ChatSummary
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.launch
 
 /** Everything [ChatsScreen] can render; see [CharactersUiState] for the rationale. */
@@ -46,6 +48,14 @@ class ChatsVM(
     private val avatar: String,
     private val source: ChatSource,
     private val creator: NewChatCreator,
+    /**
+     * Fires when a turn for this character was written to disk. The list is
+     * usually still on the back stack while the chat screen is on top, and the
+     * navigation entry's composition is gone there; a view-model-owned collector
+     * is therefore the only place that can reliably refresh the preview. `App`
+     * wires the shared signal to both factories; empty for tests that never save.
+     */
+    signals: Flow<Unit> = emptyFlow(),
 ) : ViewModel() {
 
     private val _state = MutableStateFlow<ChatsUiState>(ChatsUiState.Loading)
@@ -67,6 +77,9 @@ class ChatsVM(
 
     init {
         refresh()
+        viewModelScope.launch {
+            signals.collect { refresh() }
+        }
     }
 
     fun refresh() {
@@ -111,7 +124,11 @@ class ChatsVM(
     }
 
     internal suspend fun load() {
-        _state.value = ChatsUiState.Loading
+        // A refresh triggered while the user is looking at the list must not
+        // replace the rows with a spinner (or blank them on a transient failure):
+        // Loading is only for the first load, when there is nothing to show yet.
+        val previous = _state.value
+        if (previous !is ChatsUiState.Ready) _state.value = ChatsUiState.Loading
         _state.value = try {
             val chats = source.list(avatar).sortedWith(NEWEST_FIRST)
             if (chats.isEmpty()) ChatsUiState.Empty else ChatsUiState.Ready(chats)
@@ -120,7 +137,9 @@ class ChatsVM(
         } catch (error: Throwable) {
             // Includes ChatFormatException: a chat file that cannot be represented is
             // an error the user must see, never an empty list that looks like "no chats".
-            ChatsUiState.Failed(failureText(error))
+            // With rows already on screen, a failed background refresh keeps them:
+            // the next refresh can recover and the user loses no scroll position.
+            if (previous is ChatsUiState.Ready) previous else ChatsUiState.Failed(failureText(error))
         }
     }
 
@@ -135,8 +154,9 @@ class ChatsVM(
             avatar: String,
             source: ChatSource,
             creator: NewChatCreator,
+            signals: Flow<Unit> = emptyFlow(),
         ): ViewModelProvider.Factory = viewModelFactory {
-            initializer { ChatsVM(avatar, source, creator) }
+            initializer { ChatsVM(avatar, source, creator, signals) }
         }
     }
 }
