@@ -32,6 +32,24 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_SERVER_DIR = path.resolve(HERE, '../../SillyTavern');
 
 export const GENERATE_PATH = '/api/backends/chat-completions/generate';
+
+/**
+ * The headless builder can only reproduce an OpenAI-compatible send. The seeded
+ * settings default to `main_api: "koboldhorde"`; Generate() then never posts to
+ * the chat-completions route, and build() would wait out its whole 180 s timeout
+ * on the very first message of a fresh install. Fail before the send instead,
+ * with the backend name and the screen that fixes it.
+ *
+ * Exported so the preflight can be unit-tested without booting jsdom.
+ */
+export function assertSupportedBackend(mainApi) {
+    if (mainApi === 'openai') return;
+    const current = mainApi || '(not set)';
+    throw new Error(
+        `build(): unsupported backend ${JSON.stringify(current)}; ` +
+        'open 设置 and save a provider (OpenAI 兼容 / OpenRouter / OpenAI 官方)',
+    );
+}
 export const STATUS_PATH = '/api/backends/chat-completions/status';
 
 // The stub answer the client receives after it has POSTed /generate. The
@@ -442,6 +460,10 @@ export async function createBuilder({ dataDir, port, serverDir = DEFAULT_SERVER_
             label: 'characters to load',
         });
         mark('characters');
+        // A fresh install seeds main_api: koboldhorde; Generate() would then
+        // never reach the chat-completions route and the first send would hang
+        // for the full 180 s timeout. Reject it before touching the UI.
+        assertSupportedBackend(ctx().mainApi);
         await ensureOnline();
         mark('online');
 
@@ -497,12 +519,33 @@ export async function createBuilder({ dataDir, port, serverDir = DEFAULT_SERVER_
             if (!loaded) {
                 // Empty chat: the real path materialises the greeting; keep it
                 // (and its save) rather than inventing a different history.
-                const reload = ctx().reloadCurrentChat;
+                // Prefer the unsafe variant when a client exposes it: the mutex-
+                // wrapped version can return immediately when another reload holds
+                // the mutex, leaving the previous chat's messages in place.
+                const reload = typeof ctx().reloadCurrentChatUnsafe === 'function'
+                    ? ctx().reloadCurrentChatUnsafe
+                    : ctx().reloadCurrentChat;
                 if (typeof reload !== 'function') throw new Error('reloadCurrentChat is not available; cannot reload the chat for this turn');
                 await reload();
                 lastChatKey = `${index}:${fileName}`;
                 lastChatManifest = normalizeManifest(ctx().chatMetadata);
                 chatStateGeneration += 1;
+
+                // Post-condition: a card with an opening message must leave one
+                // in the chat after the reload. Building from the previous chat's
+                // history silently sends the wrong prompt, which is worse than
+                // failing this turn.
+                const liveCard = ctx().characters?.[index] ?? character;
+                const greeting = liveCard?.first_mes
+                    || liveCard?.data?.first_mes
+                    || liveCard?.data?.alternate_greetings?.[0]
+                    || '';
+                if (greeting && ctx().chat.length === 0) {
+                    throw new Error(
+                        'build(): the chat reload did not apply the new chat; ' +
+                        'refusing to build from the previous chat state',
+                    );
+                }
             }
             mark('chat');
         } else {

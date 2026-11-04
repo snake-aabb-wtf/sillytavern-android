@@ -226,7 +226,10 @@ export function createNativeChatRouter({ builder, forward, log = console.info })
             });
         } catch (error) {
             const message = String(error?.message || error);
-            const notImplemented = /unsupported type/i.test(message);
+            // "unsupported type" and the pre-send backend check are client-config
+            // problems, not server failures; 501 tells the app to show the message
+            // instead of retrying.
+            const notImplemented = /unsupported type|unsupported backend/i.test(message);
             log(`[native] build failed after ${Date.now() - startedAt}ms: ${message}`);
             sendJson(res, notImplemented ? 501 : 500, { error: `prompt build failed: ${message}` });
             return;

@@ -306,3 +306,35 @@ test('aborts the upstream when the client disconnects', async () => {
         await app.close();
     }
 });
+
+test('maps the unsupported-backend preflight to 501, not a generic 500', async () => {
+    const builds = [];
+    const app = await listen(createNativeChatRouter({
+        builder: {
+            async build(options) {
+                builds.push(options);
+                // The exact shape prompt-builder/assertSupportedBackend throws.
+                throw new Error(
+                    'build(): unsupported backend "koboldhorde"; open 设置 and save a provider '
+                    + '(OpenAI 兼容 / OpenRouter / OpenAI 官方)',
+                );
+            },
+        },
+        forward: () => assert.fail('forward must not run without a supported backend'),
+    }));
+
+    try {
+        const response = await fetch(app.url, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ avatar_url: AVATAR, file_name: CHAT, user_input: INPUT, type: 'send' }),
+        });
+        assert.equal(response.status, 501);
+        const payload = await response.json();
+        assert.match(payload.error, /koboldhorde/);
+        assert.match(payload.error, /设置/);
+        assert.equal(builds.length, 1);
+    } finally {
+        await app.close();
+    }
+});

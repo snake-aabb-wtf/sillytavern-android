@@ -1,0 +1,22 @@
+{
+  "username": "User",
+  "main_api": "koboldhorde",
+  "firstRun": false,
+  "amount_gen": 300,
+  "max_context": 4096,
+  "oai_settings": {
+    "chat_completion_source": "openai",
+    "openai_model": "gpt-4o-mini",
+    "openai_max_context": 4096,
+    "openai_max_tokens": 300,
+    "stream_openai": true,
+    "bypass_status_check": true,
+    "temp_openai": 1.0,
+    "top_p_openai": 1.0,
+    "freq_pen_openai": 0,
+    "pres_pen_openai": 0
+  },
+  "power_user": {
+    "world_import_dialog": false
+  }
+}
