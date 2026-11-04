@@ -299,9 +299,11 @@ export async function createBuilder({ dataDir, port, serverDir = DEFAULT_SERVER_
     // jsdom (measured ~2 s per turn) purely to draw the panel. It cannot affect
     // the /generate body, so disable the debounced re-render for this headless
     // client. The one-shot render done while the manager is created stays.
+    let openaiModule = null;
     try {
         const openaiUrl = pathToFileURL(path.join(serverDir, 'public', 'scripts', 'openai.js')).href;
         const openai = await import(openaiUrl);
+        openaiModule = openai;
         if (openai.promptManager?.renderDebounced) {
             openai.promptManager.renderDebounced = () => {};
         } else {
@@ -343,6 +345,39 @@ export async function createBuilder({ dataDir, port, serverDir = DEFAULT_SERVER_
     };
 
     /**
+     * Re-reads the provider block from settings.json into the live client.
+     *
+     * Only the two pieces the send body depends on are refreshed: the OpenAI
+     * provider settings (model, URL, presets) and the selected backend. A full
+     * `getSettings()` re-runs extension/theme/onboarding boot work that jsdom
+     * does not need and can take minutes; this is the same subset that produced
+     * the boot-time state, applied again from disk.
+     */
+    async function refreshClientProvider() {
+        const context = ctx();
+        const response = await window.fetch('/api/settings/get', {
+            method: 'POST',
+            headers: context.getRequestHeaders(),
+            cache: 'no-cache',
+            body: JSON.stringify({}),
+        });
+        if (!response.ok) throw new Error(`POST /api/settings/get failed (${response.status})`);
+        const data = await response.json();
+        if (data?.result === 'file not find' || !data?.settings) {
+            throw new Error('/api/settings/get returned no settings');
+        }
+        if (typeof openaiModule?.loadOpenAISettings !== 'function') {
+            throw new Error('loadOpenAISettings is not available; cannot refresh the provider');
+        }
+        if (typeof host.app?.changeMainAPI !== 'function') {
+            throw new Error('changeMainAPI is not available; cannot refresh the backend');
+        }
+        const settings = JSON.parse(data.settings);
+        openaiModule.loadOpenAISettings(data, settings);
+        host.app.changeMainAPI(settings.main_api);
+    }
+
+    /**
      * The backend build() should dispatch on.
      *
      * `ctx().mainApi` is a boot-time snapshot: the client reads settings once
@@ -350,17 +385,16 @@ export async function createBuilder({ dataDir, port, serverDir = DEFAULT_SERVER_
      * reused for the whole app process. A provider saved since then exists only
      * in settings.json, so reading the snapshot alone would tell the user to do
      * the thing they just did, forever. Read the file per build and, when it
-     * disagrees, make the client re-read its settings once before deciding.
+     * disagrees, make the client re-read its provider settings once before
+     * deciding.
      */
     async function resolveEffectiveBackend() {
         const onDisk = readSettingsMainApi(dataDir);
         const cached = ctx().mainApi;
         if (!onDisk || onDisk === cached) return { mainApi: cached, onDisk };
 
-        const getSettings = host.app?.getSettings;
-        if (typeof getSettings !== 'function') return { mainApi: cached, onDisk };
         try {
-            await getSettings();
+            await refreshClientProvider();
         } catch (error) {
             log(`[builder] settings refresh failed: ${error?.message || error}`);
             return { mainApi: cached, onDisk };
