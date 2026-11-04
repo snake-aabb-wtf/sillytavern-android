@@ -8,9 +8,18 @@
 - **上游**：SillyTavern v1.19.0（`06bde939fb1e9c4c8d8641d810f0a916b5bce127`），以 git subtree 引入 `SillyTavern/`
 - **许可**：AGPL-3.0（见 [LICENSE](LICENSE) 与 [NOTICE](NOTICE)）
 
+## 当前发布状态（2026-11-04）
+
+- **正式版：1.0.3（WebView）** —— 标签 `st-sol-1.0.3`，七项真机验收已在 OPPO Find X3 Pro / Android 14 全部通过。日常使用装这个。
+- **原生 Compose 客户端（分支 `feature/compose-ui`）：已冻结，不再维护。**
+  2026-11-04 决定停止开发：它只覆盖「角色列表 → 会话列表 → 聊天」主线，消息编辑/删除/重发、swipe、预设、世界书、群聊、扩展、角色导入都还没有，`regenerate`/`continue` 仍返回 501。继续投入的收益不足以支撑成本。
+  分支、代码与预览包（`st-sol-m1-2026.11.04`）保留作实验记录，**不推荐安装，也不要再向它提功能需求**。
+
 ## 下载
 
-从 [Releases](https://github.com/snake-aabb-wtf/sillytavern-android/releases) 取最新 `st-sol-*` 标签下的 `app-debug.apk`。
+从 [Releases](https://github.com/snake-aabb-wtf/sillytavern-android/releases) 取 **`st-sol-1.0.3`** 下的 `app-debug.apk`（WebView 正式版）。
+
+> `st-sol-m1-*` 标签下的包是已冻结的原生 Compose 预览版，功能残缺，仅作实验存档。
 
 - debug 签名，可直接覆盖安装后续构建；`data/` 不会被清空
 - APK 约 **200 MiB**；首次启动还要解压约 152 MB 的运行时，建议设备留出 **1.5 GB** 可用空间
