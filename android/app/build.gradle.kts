@@ -1,3 +1,5 @@
+import java.util.Base64
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -37,7 +39,7 @@ val releaseKeystoreFile: File? = if (releaseSigningConfigured) {
         "release.keystore",
     )
     target.parentFile?.mkdirs()
-    target.writeBytes(java.util.Base64.getDecoder().decode(envReleaseKeystore.trim()))
+    target.writeBytes(Base64.getDecoder().decode(envReleaseKeystore.trim()))
     target
 } else {
     null
