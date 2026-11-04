@@ -1,3 +1,7 @@
+> **已冻结（2026-11-04）**：本分支的原生 Compose 客户端**不再维护**。
+> 正式版是 `main` 上的 WebView 版本（`st-sol-1.0.3`，七项真机验收已通过），请装那个。
+> 本分支仅作实验记录保留：消息编辑/删除/重发、swipe、预设、世界书、群聊、扩展、角色导入都未实现，`regenerate`/`continue` 仍返回 501。不要再向这条分支提功能需求。
+
 # SillyTavern Sol — SillyTavern for Android
 
 把 [SillyTavern](https://github.com/SillyTavern/SillyTavern) 打包成一台手机上就能跑的自足应用：App 内嵌 Node 运行时启动本地服务，界面由原生 Jetpack Compose 客户端绘制，所有数据留在应用私有目录。
