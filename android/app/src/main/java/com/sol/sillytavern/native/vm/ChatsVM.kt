@@ -5,7 +5,6 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
-import com.sol.sillytavern.native.data.ChatRepository
 import com.sol.sillytavern.native.data.model.ChatSummary
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -28,7 +27,16 @@ fun interface ChatSource {
 }
 
 /**
- * Loads one character's chat list.
+ * The data-layer seam for [ChatsVM.newChat]: greeting lookup, unique name and save,
+ * returning the file that was written. A failed creation must throw; the view model
+ * turns that into a visible error.
+ */
+fun interface NewChatCreator {
+    suspend fun create(characterName: String): String
+}
+
+/**
+ * Loads one character's chat list and starts new chats.
  *
  * `POST /api/characters/chats` answers in directory order, so sorting is this class's
  * job: newest `updatedAt` first, with the title as a stable tie-breaker so two chats
@@ -37,10 +45,23 @@ fun interface ChatSource {
 class ChatsVM(
     private val avatar: String,
     private val source: ChatSource,
+    private val creator: NewChatCreator,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow<ChatsUiState>(ChatsUiState.Loading)
     val state: StateFlow<ChatsUiState> = _state.asStateFlow()
+
+    /** True while a chat is being written; the button is disabled so one tap makes one file. */
+    private val _creating = MutableStateFlow(false)
+    val creating: StateFlow<Boolean> = _creating.asStateFlow()
+
+    /** The file just created; `App` navigates on it and calls [consumeCreated]. */
+    private val _created = MutableStateFlow<String?>(null)
+    val created: StateFlow<String?> = _created.asStateFlow()
+
+    /** A creation failure the screen must show; cleared by [dismissCreateError]. */
+    private val _createError = MutableStateFlow<String?>(null)
+    val createError: StateFlow<String?> = _createError.asStateFlow()
 
     private var job: Job? = null
 
@@ -51,6 +72,42 @@ class ChatsVM(
     fun refresh() {
         job?.cancel()
         job = viewModelScope.launch { load() }
+    }
+
+    /**
+     * Writes a chat that opens with the character's greeting. Without one a fresh
+     * install has characters but no way to say the first word (Ruling R10).
+     */
+    fun newChat() {
+        // The UI disables the button, but a second tap can still race the first
+        // recomposition; one in-flight creation per view model is enough.
+        if (_creating.value) return
+        _creating.value = true
+        _createError.value = null
+        viewModelScope.launch {
+            try {
+                _created.value = creator.create(characterName())
+                // The list predates the file; reloading now means backing out of the
+                // new chat shows it without the user asking for a refresh.
+                refresh()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                // Never silent: the user must know the chat was not created.
+                _createError.value = failureText(error)
+            } finally {
+                _creating.value = false
+            }
+        }
+    }
+
+    /** Called after navigation so the same file cannot be opened twice. */
+    fun consumeCreated() {
+        _created.value = null
+    }
+
+    fun dismissCreateError() {
+        _createError.value = null
     }
 
     internal suspend fun load() {
@@ -67,15 +124,19 @@ class ChatsVM(
         }
     }
 
+    /** `Seraphina.png` → `Seraphina`; the chat file name is built from the card's name. */
+    private fun characterName(): String = avatar.substringBeforeLast('.', avatar)
+
     companion object {
         private val NEWEST_FIRST =
             compareByDescending<ChatSummary> { it.updatedAt }.thenBy { it.title }
 
-        fun of(avatar: String, repository: ChatRepository): ViewModelProvider.Factory =
-            of(avatar, ChatSource { repository.list(it) })
-
-        fun of(avatar: String, source: ChatSource): ViewModelProvider.Factory = viewModelFactory {
-            initializer { ChatsVM(avatar, source) }
+        fun of(
+            avatar: String,
+            source: ChatSource,
+            creator: NewChatCreator,
+        ): ViewModelProvider.Factory = viewModelFactory {
+            initializer { ChatsVM(avatar, source, creator) }
         }
     }
 }

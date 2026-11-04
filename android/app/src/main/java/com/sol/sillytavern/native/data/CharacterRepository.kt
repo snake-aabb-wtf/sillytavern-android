@@ -7,6 +7,7 @@ import com.sol.sillytavern.native.engine.EngineClient
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 
 /**
  * Reads the character list from the bundled server.
@@ -24,6 +25,29 @@ class CharacterRepository(private val engine: EngineClient) {
         return characters.mapNotNull { (it as? JsonObject)?.toCharacter() }
     }
 
+    /**
+     * The card's opening messages, from `POST /api/characters/get`.
+     *
+     * `/all` may answer with a shallow card when `performance.lazyLoadCharacters` is
+     * on, and the listed model never carried the greeting anyway. `get` always returns
+     * the full card (`processCharacter(..., { shallow: false })`), with `first_mes`
+     * hoisted to the top level and the alternates under `data.alternate_greetings`.
+     */
+    suspend fun greeting(avatar: String): CharacterGreeting {
+        val payload = engine.postJson(
+            PATH_GET,
+            buildJsonObject { put("avatar_url", avatar) },
+        )
+        val card = payload as? JsonObject
+            ?: throw IllegalStateException("$PATH_GET did not return a character: $payload")
+        val data = card["data"] as? JsonObject
+        return CharacterGreeting(
+            firstMes = card.string("first_mes").ifBlank { data?.string("first_mes").orEmpty() },
+            alternates = data?.stringList("alternate_greetings").orEmpty()
+                .ifEmpty { card.stringList("alternate_greetings") },
+        )
+    }
+
     private fun JsonObject.toCharacter(): Character = Character(
         avatar = string("avatar"),
         name = string("name"),
@@ -33,5 +57,6 @@ class CharacterRepository(private val engine: EngineClient) {
 
     private companion object {
         const val PATH_ALL = "/api/characters/all"
+        const val PATH_GET = "/api/characters/get"
     }
 }

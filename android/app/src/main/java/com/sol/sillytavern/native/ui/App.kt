@@ -21,6 +21,7 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.sol.sillytavern.native.data.CharacterRepository
 import com.sol.sillytavern.native.data.ChatRepository
+import com.sol.sillytavern.native.data.NewChatService
 import com.sol.sillytavern.native.data.SettingsRepository
 import com.sol.sillytavern.native.engine.EngineClient
 import com.sol.sillytavern.native.ui.chat.ChatScreen
@@ -33,6 +34,7 @@ import com.sol.sillytavern.native.vm.ChatSource
 import com.sol.sillytavern.native.vm.ChatTurn
 import com.sol.sillytavern.native.vm.ChatVM
 import com.sol.sillytavern.native.vm.ChatsVM
+import com.sol.sillytavern.native.vm.NewChatCreator
 import com.sol.sillytavern.native.vm.SettingsVM
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -125,15 +127,29 @@ fun SolApp(port: Int, onFirstFrame: () -> Unit = {}) {
                 ) { entry ->
                     val avatar = entry.arguments?.getString(Routes.ARG_AVATAR).orEmpty()
                     val chatsVM: ChatsVM = viewModel(
-                        factory = ChatsVM.of(avatar, client.chats),
+                        factory = client.chatsVMFactory(avatar),
                     )
                     val state by chatsVM.state.collectAsState()
+                    val creating by chatsVM.creating.collectAsState()
+                    val createError by chatsVM.createError.collectAsState()
+                    val created by chatsVM.created.collectAsState()
+                    // One-shot event: consume before navigating so this entry does not
+                    // reopen the same file on every recomposition.
+                    LaunchedEffect(created) {
+                        val file = created ?: return@LaunchedEffect
+                        chatsVM.consumeCreated()
+                        navController.navigate(Routes.chat(avatar, file))
+                    }
                     ChatsScreen(
                         title = characterName(avatar),
                         state = state,
+                        creating = creating,
+                        createError = createError,
                         onChatClick = { chat ->
                             navController.navigate(Routes.chat(avatar, chat.file))
                         },
+                        onNewChat = chatsVM::newChat,
+                        onDismissCreateError = chatsVM::dismissCreateError,
                         onRetry = chatsVM::refresh,
                         onBack = { navController.popBackStack() },
                     )
@@ -186,7 +202,16 @@ private class SolClient(port: Int) {
     val characters = CharacterSource { characterRepository.list() }
     val chats = ChatSource { avatar -> chatRepository.list(avatar) }
 
+    private val newChatService = NewChatService(characterRepository, chatRepository)
+
     fun settingsVMFactory(): ViewModelProvider.Factory = SettingsVM.of(settingsRepository)
+
+    /** The chat list plus creation; the avatar is fixed per destination. */
+    fun chatsVMFactory(avatar: String): ViewModelProvider.Factory = ChatsVM.of(
+        avatar = avatar,
+        source = chats,
+        creator = NewChatCreator { name -> newChatService.create(avatar, name) },
+    )
 
     /**
      * One chat turn: the posted body is fixed by `native/endpoints/native-chat.mjs`

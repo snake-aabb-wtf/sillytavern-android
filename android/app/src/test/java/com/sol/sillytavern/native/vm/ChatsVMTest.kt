@@ -27,7 +27,7 @@ class ChatsVMTest {
         val tieB = chat("b.jsonl", "Bravo", 2_000L)
         val tieA = chat("a.jsonl", "Alpha", 2_000L)
 
-        val vm = ChatsVM(AVATAR, ChatSource { listOf(older, newest, tieB, tieA) })
+        val vm = ChatsVM(AVATAR, ChatSource { listOf(older, newest, tieB, tieA) }, noCreator)
 
         val ready = vm.state.value as ChatsUiState.Ready
         assertEquals(
@@ -38,7 +38,7 @@ class ChatsVMTest {
 
     @Test
     fun anEmptyListIsTheEmptyState() {
-        val vm = ChatsVM(AVATAR, ChatSource { emptyList() })
+        val vm = ChatsVM(AVATAR, ChatSource { emptyList() }, noCreator)
 
         assertEquals(ChatsUiState.Empty, vm.state.value)
     }
@@ -50,6 +50,7 @@ class ChatsVMTest {
             ChatSource {
                 throw ChatFormatException("/api/chats/get returned {} instead of a chat array")
             },
+            noCreator,
         )
 
         val failed = vm.state.value as ChatsUiState.Failed
@@ -65,6 +66,7 @@ class ChatsVMTest {
                 if (failing) throw ChatFormatException("corrupt chat file")
                 listOf(chat("ok.jsonl", "Fixed", 10L))
             },
+            noCreator,
         )
         assertTrue(vm.state.value is ChatsUiState.Failed)
 
@@ -77,6 +79,9 @@ class ChatsVMTest {
 
     private fun chat(file: String, title: String, updatedAt: Long) =
         ChatSummary(file = file, title = title, lastMessage = "", updatedAt = updatedAt)
+
+    /** These tests pin the list contract; the creator is never invoked. */
+    private val noCreator = NewChatCreator { error("new chat is not exercised here") }
 
     private companion object {
         const val AVATAR = "Seraphina.png"
