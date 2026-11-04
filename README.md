@@ -86,11 +86,13 @@ cd android && ./gradlew testDebugUnitTest assembleDebug
 先抓一次再比对：
 
 ```bash
+(cd SillyTavern && npm ci)              # capture:reference 会启动 server.js
 cd native && npm ci
 npx playwright install chromium         # 仅抓取需要浏览器
 npm run capture:reference               # → fixtures/reference/*.json
 npm run test:headless                   # 末尾打印 RESULT: PASS (3/3)
 npm run test:unit                       # 路由、worker 恢复、后端 preflight（秒级）
+npm run test:backend-refresh            # 真服务器+jsdom：保存 provider 后同一进程可发送
 ```
 
 CI 产物：`android/app/build/outputs/apk/debug/app-debug.apk`，artifact 名 `app-debug-apk`。

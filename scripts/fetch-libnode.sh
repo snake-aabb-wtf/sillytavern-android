@@ -35,21 +35,38 @@ if [[ -z "$REPO" ]]; then
 fi
 [[ -n "$REPO" && "$REPO" == */* ]] || die "cannot determine the GitHub repository; set GITHUB_REPOSITORY=owner/repo"
 
-# Optional, used only to avoid unauthenticated API rate limits.
+# Optional, used only to avoid unauthenticated API rate limits. The expression
+# must expand the variable: a literal placeholder would make every authorised
+# request 401 and silently disable the digest check below.
+auth_token="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
 auth_args=()
-if [[ -n "${GITHUB_TOKEN:-}" ]]; then
-    auth_args=(-H "Authorization: Bearer $GITHUB_TOKEN")
-elif [[ -n "${GH_TOKEN:-}" ]]; then
-    auth_args=(-H "Authorization: Bearer $GH_TOKEN")
+if [[ -n "$auth_token" ]]; then
+    auth_args=(-H "Authorization: Bearer ${auth_token}")
 fi
 
 asset_sha=""
 if [[ -z "${SKIP_DIGEST:-}" ]]; then
-    asset_sha="$(curl -fsSL --retry 3 "${auth_args[@]}" \
+    digest_body="$(mktemp)"
+    http_status="$(curl -sS --retry 3 "${auth_args[@]}" \
         -H 'Accept: application/vnd.github+json' \
-        "https://api.github.com/repos/$REPO/releases/tags/$TAG" 2>/dev/null \
-        | python3 -c 'import json,sys; d=json.load(sys.stdin); a=next((x for x in d.get("assets",[]) if x.get("name")=="libnode.so"), {}); s=(a.get("digest") or ""); print(s[7:] if s.startswith("sha256:") else "")' \
-        2>/dev/null || true)"
+        -o "$digest_body" \
+        -w '%{http_code}' \
+        "https://api.github.com/repos/$REPO/releases/tags/$TAG" || true)"
+    case "$http_status" in
+        200)
+            asset_sha="$(python3 -c 'import json,sys; d=json.load(sys.stdin); a=next((x for x in d.get("assets",[]) if x.get("name")=="libnode.so"), {}); s=(a.get("digest") or ""); print(s[7:] if s.startswith("sha256:") else "")' \
+                < "$digest_body" 2>/dev/null || true)"
+            ;;
+        401|403)
+            printf 'fetch-libnode: WARNING: GitHub API returned HTTP %s for %s; digest check skipped. Check the token scopes and the API rate limit.\n' \
+                "$http_status" "$TAG" >&2
+            ;;
+        *)
+            printf 'fetch-libnode: WARNING: could not read the digest for %s (HTTP %s); digest check skipped.\n' \
+                "$TAG" "${http_status:-no response}" >&2
+            ;;
+    esac
+    rm -f "$digest_body"
 fi
 
 valid_cached() {
