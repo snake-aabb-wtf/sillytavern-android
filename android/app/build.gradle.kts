@@ -52,7 +52,9 @@ android {
         }
         release {
             isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("debug")
+            // CI 用 zipalign + apksigner 手动签 v1+v2+v3：华为/鸿蒙安装器要核
+            // META-INF 里的 JAR 证书，只写 v2 的包会报「安装包缺少证书」。
+            signingConfig = null
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",

@@ -1,10 +1,13 @@
 name: Android
 
 # Push builds are artifact-only; tags st-sol-* additionally publish a Release.
-# The APK is the deliverable, so every push to the working branches must produce
-# one. No secrets are needed: the debug keystore is committed, headers come from a
-# public npm tarball, and libnode.so is a public Release asset built by
-# libnode-intl.yml.
+# The APK is the deliverable, so every push must produce one.
+# The release APK is signed in CI with the project's release key (secrets
+# RELEASE_KEYSTORE_BASE64 / RELEASE_KEYSTORE_PASSWORD / RELEASE_KEY_ALIAS /
+# RELEASE_KEY_PASSWORD). apksigner writes v1+v2+v3: Huawei/HarmonyOS installers
+# verify the JAR (v1) certificate and reject v2-only packages.
+# headers come from a public npm tarball, and libnode.so is a public Release asset
+# built by libnode-intl.yml.
 
 on:
   push:
@@ -32,12 +35,24 @@ env:
 
 jobs:
   build:
-    name: Build debug APK
+    name: Build release APK
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Restore signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+          if [ -z "${KEYSTORE_B64:-}" ]; then
+            echo "::error::missing RELEASE_KEYSTORE_BASE64"; exit 1
+          fi
+          echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.keystore"
+          echo "RELEASE_KEYSTORE=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
+          echo "keystore restored ($(wc -c < "$RUNNER_TEMP/release.keystore") bytes)"
 
       # A tag build must report the release version (st-sol-1.0.2 -> 1.0.2); a branch
       # build keeps the monotonic "1.0.<run_number>" scheme.
@@ -168,14 +183,35 @@ jobs:
         working-directory: android
         run: ./gradlew testDebugUnitTest --no-daemon --stacktrace
 
-      - name: Build debug APK
+      - name: Build release APK
         working-directory: android
-        run: ./gradlew assembleDebug --no-daemon --stacktrace
+        run: ./gradlew assembleRelease --no-daemon --stacktrace
+
+      - name: Sign APK (v1+v2+v3)
+        env:
+          STORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          BUILD_TOOLS="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n 1)"
+          UNSIGNED=android/app/build/outputs/apk/release/app-release-unsigned.apk
+          OUT=android/app/build/outputs/apk/release/app-release.apk
+          test -s "$UNSIGNED"
+          "$BUILD_TOOLS/zipalign" -f -p 4 "$UNSIGNED" /tmp/aligned.apk
+          "$BUILD_TOOLS/apksigner" sign \
+            --ks "$RELEASE_KEYSTORE" \
+            --ks-pass "pass:$STORE_PASSWORD" \
+            --key-pass "pass:$KEY_PASSWORD" \
+            --ks-key-alias "$KEY_ALIAS" \
+            --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true \
+            --out "$OUT" /tmp/aligned.apk
+          ls -l "$OUT"
 
       - name: Assert APK package
         run: |
           set -euo pipefail
-          APK=android/app/build/outputs/apk/debug/app-debug.apk
+          APK=android/app/build/outputs/apk/release/app-release.apk
           test -s "$APK"
           BUILD_TOOLS="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n 1)"
           "$BUILD_TOOLS/aapt" dump badging "$APK" > /tmp/badging.txt
@@ -188,11 +224,31 @@ jobs:
           unzip -l "$APK" | grep -q 'lib/arm64-v8a/libstbridge.so'
           unzip -l "$APK" | grep -q 'assets/runtime.zip'
 
+      - name: Verify APK signature
+        run: |
+          set -euo pipefail
+          APK=android/app/build/outputs/apk/release/app-release.apk
+          BUILD_TOOLS="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n 1)"
+          # apksigner skips v1 verification when minSdk >= 24 and prints false, so
+          # pin 23 here: the JAR signature must really be present for Huawei.
+          "$BUILD_TOOLS/apksigner" verify --verbose --print-certs \
+            --min-sdk-version 23 "$APK" | tee /tmp/apksigner.txt
+          grep -q "Verified using v1 scheme (JAR signing): true" /tmp/apksigner.txt \
+            || { echo "::error::APK has no v1 (JAR) signature"; exit 1; }
+          grep -q "Verified using v2 scheme (APK Signature Scheme v2): true" /tmp/apksigner.txt \
+            || { echo "::error::APK has no v2 signature"; exit 1; }
+          grep -q "Verified using v3 scheme (APK Signature Scheme v3): true" /tmp/apksigner.txt \
+            || { echo "::error::APK has no v3 signature"; exit 1; }
+          grep -q "CN=Sol SillyTavern" /tmp/apksigner.txt \
+            || { echo "::error::APK is not signed with the release certificate"; exit 1; }
+          grep -q "debuggable" /tmp/badging.txt && { echo "::error::APK is debuggable"; exit 1; } || true
+          unzip -l "$APK" | grep -E 'META-INF/.*\.(RSA|SF)' || true
+
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: app-debug-apk
-          path: android/app/build/outputs/apk/debug/app-debug.apk
+          name: app-release-apk
+          path: android/app/build/outputs/apk/release/app-release.apk
           if-no-files-found: error
           retention-days: 14
 
@@ -207,11 +263,11 @@ jobs:
       - name: Download APK
         uses: actions/download-artifact@v4
         with:
-          name: app-debug-apk
+          name: app-release-apk
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: app-debug.apk
+          files: app-release.apk
           fail_on_unmatched_files: true
           generate_release_notes: true
