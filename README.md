@@ -39,11 +39,13 @@ MainActivity (Kotlin)
 
 - 角色列表（头像、名称；数据来自服务端已有角色）
 - 会话列表（按更新时间倒序；点击进入已有聊天）
+- 新建会话：用角色开场白创建第一个聊天；没有开场白也能直接开口
 - 流式聊天与停止生成
+- API 设置：OpenAI 兼容 / OpenRouter / OpenAI 官方（含保存校验与密钥写入）
 - 深色模式跟随系统、返回键逐级返回、键盘遮挡处理
 - 数据导出/导入（zip，走系统文件选择器）、日志查看/分享/导出（原生设置页）
 
-**尚未提供**（属后续 M2/M3）：新建聊天、角色新建/编辑/PNG 导入、API 设置与连接测试、消息编辑/删除/重发/继续。因此全新安装后没有聊天文件，也无法在应用内配置 API；需要从 1.0.3 覆盖升级保留原有 `data/`，或先导入一份已配置好的数据备份。
+**尚未提供**（属后续 M2/M3）：角色新建/编辑/PNG 导入、消息编辑/删除/重发/继续、世界书/预设管理。
 
 ## 已知限制
 
@@ -74,15 +76,21 @@ MainActivity (Kotlin)
 本地步骤：
 
 ```bash
+bash scripts/fetch-libnode.sh          # 下载/校验 libnode.so（有缓存时直接跳过）
 bash scripts/stage-runtime.sh          # → dist/runtime.zip（约 5–15 分钟）
 cp dist/runtime.zip android/app/src/main/assets/
 cd android && ./gradlew testDebugUnitTest assembleDebug
 ```
 
-提示词 parity 回归（Node 侧，可在本机跑；需要 `fixtures/reference/` 中已有的浏览器抓取）：
+提示词 parity 回归（Node 侧）：仓库不提交浏览器抓取（`fixtures/reference/` 被忽略），
+先抓一次再比对：
 
 ```bash
-cd native && npm run test:headless     # 末尾打印 RESULT: PASS (3/3)
+cd native && npm ci
+npx playwright install chromium         # 仅抓取需要浏览器
+npm run capture:reference               # → fixtures/reference/*.json
+npm run test:headless                   # 末尾打印 RESULT: PASS (3/3)
+npm run test:unit                       # 路由、worker 恢复、后端 preflight（秒级）
 ```
 
 CI 产物：`android/app/build/outputs/apk/debug/app-debug.apk`，artifact 名 `app-debug-apk`。
