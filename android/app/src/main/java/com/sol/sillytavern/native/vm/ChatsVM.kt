@@ -94,7 +94,7 @@ class ChatsVM(
                 throw cancelled
             } catch (error: Throwable) {
                 // Never silent: the user must know the chat was not created.
-                _createError.value = failureText(error)
+                _createError.value = serverFailureText(error)
             } finally {
                 _creating.value = false
             }

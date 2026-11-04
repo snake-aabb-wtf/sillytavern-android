@@ -7,6 +7,7 @@ import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.sol.sillytavern.native.data.CharacterRepository
 import com.sol.sillytavern.native.data.model.Character
+import com.sol.sillytavern.native.engine.EngineError
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -100,3 +101,18 @@ class CharactersVM(private val source: CharacterSource) : ViewModel() {
  */
 internal fun failureText(error: Throwable): String =
     error.message?.takeIf { it.isNotBlank() } ?: error::class.simpleName ?: "未知错误"
+
+/**
+ * A server failure with the first line of the response body, matching what a failed
+ * chat turn shows: `HTTP 500: <server message>` is actionable where `HTTP 500` is not
+ * (a read-only data directory and a full disk otherwise look identical).
+ */
+internal fun serverFailureText(error: Throwable): String = when (error) {
+    is EngineError.Http -> {
+        val first = error.body.lineSequence().firstOrNull().orEmpty().trim().take(MAX_SERVER_ERROR_CHARS)
+        if (first.isEmpty()) "HTTP ${error.code}" else "HTTP ${error.code}: $first"
+    }
+    else -> failureText(error)
+}
+
+private const val MAX_SERVER_ERROR_CHARS = 200

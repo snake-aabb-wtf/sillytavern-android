@@ -48,6 +48,14 @@ object NewChat {
     private const val USER_NAME = "User"
     private const val DEFAULT_CHARACTER_NAME = "Character"
 
+    /**
+     * `sanitize-filename` truncates the whole file name to 255 UTF-8 bytes
+     * (`node_modules/sanitize-filename/index.js`), and `/api/characters/chats` only
+     * lists files ending in `.jsonl`. A longer character name would therefore lose
+     * the extension and the chat would vanish from the list after creation.
+     */
+    private const val MAX_FILE_NAME_BYTES = 255
+
     /** `2026-11-04@07h41m02s`, exactly as `humanizedDateTime()` in the server formats it. */
     private val FILE_TIME: DateTimeFormatter =
         DateTimeFormatter.ofPattern("uuuu-MM-dd'@'HH'h'mm'm'ss's'")
@@ -82,19 +90,65 @@ object NewChat {
 
         val lines = mutableListOf<JsonElement>(header)
         if (opening.isNotBlank()) lines += openingMessage(name, opening, now)
-        return NewChatFile(file = "${fileName(name)} - ${FILE_TIME.format(now)}$EXTENSION", chat = JsonArray(lines))
+        return NewChatFile(file = composeName(fileName(name), FILE_TIME.format(now), attempt = 1), chat = JsonArray(lines))
     }
 
     /**
      * Keeps [candidate] unless it is already on disk; then appends ` 2`, ` 3`, … so a
      * second chat started in the same second never overwrites the first.
+     *
+     * The suffix is added inside the 255-byte budget, so the character part shrinks
+     * by the two extra bytes instead of pushing `.jsonl` off the end.
      */
     fun uniqueName(candidate: String, taken: Set<String>): String {
         if (candidate !in taken) return candidate
-        val base = candidate.removeSuffix(EXTENSION)
+        val stem = candidate.removeSuffix(EXTENSION)
+        val separator = stem.lastIndexOf(" - ")
+        val characterPart = if (separator >= 0) stem.substring(0, separator) else stem
+        val tail = if (separator >= 0) stem.substring(separator) else ""
         var index = 2
-        while ("$base $index$EXTENSION" in taken) index++
-        return "$base $index$EXTENSION"
+        while (true) {
+            val marker = " $index"
+            val budget = MAX_FILE_NAME_BYTES - (tail + marker + EXTENSION).utf8Size()
+            val capped = truncateUtf8(characterPart, budget).trimEnd(' ', '.')
+                .ifBlank { DEFAULT_CHARACTER_NAME }
+            val name = capped + tail + marker + EXTENSION
+            if (name !in taken) return name
+            index++
+        }
+    }
+
+    /**
+     * `"<character> - <stamp><attempt><.jsonl>"` within the server's byte limit.
+     * The stamp and the extension are fixed; only the character part may shrink.
+     */
+    private fun composeName(characterPart: String, stamp: String, attempt: Int): String {
+        val marker = if (attempt <= 1) "" else " $attempt"
+        val tail = " - $stamp$marker$EXTENSION"
+        val budget = MAX_FILE_NAME_BYTES - tail.utf8Size()
+        val capped = truncateUtf8(characterPart, budget).trimEnd(' ', '.')
+            .ifBlank { DEFAULT_CHARACTER_NAME }
+        return capped + tail
+    }
+
+    private fun String.utf8Size(): Int = toByteArray(Charsets.UTF_8).size
+
+    /** Cuts [text] at a code-point boundary so it fits [maxBytes] UTF-8 bytes. */
+    private fun truncateUtf8(text: String, maxBytes: Int): String {
+        if (text.utf8Size() <= maxBytes) return text
+        val out = StringBuilder()
+        var used = 0
+        var index = 0
+        while (index < text.length) {
+            val codePoint = text.codePointAt(index)
+            val charCount = Character.charCount(codePoint)
+            val bytes = text.substring(index, index + charCount).utf8Size()
+            if (used + bytes > maxBytes) break
+            out.append(text, index, index + charCount)
+            used += bytes
+            index += charCount
+        }
+        return out.toString()
     }
 
     private fun fileName(name: String): String {

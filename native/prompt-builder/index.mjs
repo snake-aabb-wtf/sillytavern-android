@@ -198,6 +198,11 @@ export async function createBuilder({ dataDir, port, serverDir = DEFAULT_SERVER_
     // keeps in memory cannot cause a spurious chat-switch notification.
     let lastChatKey = null;
     let lastChatManifest = null;
+    // Monotonic count of chat states applied by loadChatState(). build() waits
+    // on this instead of a message count: a chat created by the native client
+    // legitimately has zero or one message, so `chat.length >= 2` only held for
+    // the captured two-message fixtures and hung on every fresh chat.
+    let chatStateGeneration = 0;
 
     try {
         await waitForServer(child, baseUrl);
@@ -397,6 +402,7 @@ export async function createBuilder({ dataDir, port, serverDir = DEFAULT_SERVER_
         }
         lastChatKey = key;
         lastChatManifest = nextManifest;
+        chatStateGeneration += 1;
         const eventsAt = performance.now();
         log(`[builder] chat load (ms): fetch=${Math.round(fetchedAt - startedAt)} ` +
             `apply=${Math.round(appliedAt - fetchedAt)} events=${Math.round(eventsAt - appliedAt)} ` +
@@ -465,6 +471,11 @@ export async function createBuilder({ dataDir, port, serverDir = DEFAULT_SERVER_
             typeof app.setCharacterId === 'function' &&
             typeof app.setCharacterName === 'function';
 
+        // Everything below loads exactly one chat. The marker is advanced when
+        // that chat's header and messages have been applied - not when some
+        // message count is reached, because a new chat has 0 or 1 messages.
+        const chatGenerationBefore = chatStateGeneration;
+
         if (canAdoptDirectly) {
             if (String(ctx().characterId) !== String(index)) {
                 if (typeof app.unshallowCharacter === 'function') {
@@ -491,6 +502,7 @@ export async function createBuilder({ dataDir, port, serverDir = DEFAULT_SERVER_
                 await reload();
                 lastChatKey = `${index}:${fileName}`;
                 lastChatManifest = normalizeManifest(ctx().chatMetadata);
+                chatStateGeneration += 1;
             }
             mark('chat');
         } else {
@@ -499,14 +511,15 @@ export async function createBuilder({ dataDir, port, serverDir = DEFAULT_SERVER_
             await ctx().selectCharacterById(index, { switchMenu: false });
             lastChatKey = `${index}:${fileName}`;
             lastChatManifest = normalizeManifest(ctx().chatMetadata);
+            chatStateGeneration += 1;
             mark('select');
             mark('chat');
         }
 
-        await host.waitFor(() => Array.isArray(ctx().chat) && ctx().chat.length >= 2, {
-            timeoutMs: 60_000,
-            label: 'fixture chat to load',
-        });
+        await host.waitFor(
+            () => Array.isArray(ctx().chat) && chatStateGeneration > chatGenerationBefore,
+            { timeoutMs: 60_000, label: 'requested chat to be applied' },
+        );
         mark('chatReady');
 
         const textarea = window.document.querySelector('#send_textarea');

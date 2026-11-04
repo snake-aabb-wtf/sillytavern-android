@@ -414,15 +414,7 @@ class ChatVM(
             }
         }
 
-        private fun turnFailureText(error: Throwable): String = when (error) {
-            is EngineError.Http -> {
-                val first = error.body.lineSequence().firstOrNull().orEmpty().trim().take(MAX_ERROR_CHARS)
-                if (first.isEmpty()) "HTTP ${error.code}" else "HTTP ${error.code}: $first"
-            }
-            else -> failureText(error)
-        }
-
-        private const val MAX_ERROR_CHARS = 200
+        private fun turnFailureText(error: Throwable): String = serverFailureText(error)
 
         fun of(
             avatar: String,

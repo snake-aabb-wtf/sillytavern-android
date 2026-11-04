@@ -2,6 +2,7 @@ package com.sol.sillytavern.native.vm
 
 import com.sol.sillytavern.native.data.ChatFormatException
 import com.sol.sillytavern.native.data.model.ChatSummary
+import com.sol.sillytavern.native.engine.EngineError
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -75,6 +76,24 @@ class ChatsVMTest {
 
         val ready = vm.state.value as ChatsUiState.Ready
         assertEquals(listOf("ok.jsonl"), ready.chats.map { it.file })
+    }
+
+    @Test
+    fun aCreationFailureCarriesTheServerMessageNotJustTheStatus() {
+        val vm = ChatsVM(
+            AVATAR,
+            ChatSource { emptyList() },
+            NewChatCreator {
+                // A read-only data directory and a full disk both answer 500;
+                // only the body tells the user which one happened.
+                throw EngineError.Http(500, "ENOSPC: no space left on device\n    at fs.write")
+            },
+        )
+
+        vm.newChat()
+
+        assertEquals("HTTP 500: ENOSPC: no space left on device", vm.createError.value)
+        assertEquals(null, vm.created.value)
     }
 
     private fun chat(file: String, title: String, updatedAt: Long) =

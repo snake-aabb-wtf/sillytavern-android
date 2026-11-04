@@ -78,7 +78,29 @@ class NewChatTest {
         assertFalse("a slash would create a subdirectory: $file", file.contains('/'))
         assertFalse("a backslash is a separator on Windows: $file", file.contains('\\'))
         assertFalse("a colon is illegal in a file name: $file", file.contains(':'))
-        assertTrue(file.endsWith(".jsonl"))
+        assertEquals("a_b_c_d - 2026-11-04@07h41m02s.jsonl", file)
+    }
+
+    @Test
+    fun aLongCjkNameIsCappedByBytesAndKeepsTheExtension() {
+        // 120 CJK characters = 360 UTF-8 bytes, well past sanitize-filename's 255.
+        val longName = "角".repeat(120)
+
+        val file = NewChat.build(longName, "hi", emptyList(), now).file
+
+        assertTrue(
+            "the whole name must fit the server's 255-byte limit: ${file.toByteArray(Charsets.UTF_8).size}",
+            file.toByteArray(Charsets.UTF_8).size <= 255,
+        )
+        assertTrue("the extension must survive truncation: $file", file.endsWith(".jsonl"))
+        assertFalse("a code point must not be cut in half", file.contains('\uFFFD'))
+
+        val suffixed = NewChat.uniqueName(file, setOf(file))
+        assertTrue(
+            "the suffix must stay inside the same limit: ${suffixed.toByteArray(Charsets.UTF_8).size}",
+            suffixed.toByteArray(Charsets.UTF_8).size <= 255,
+        )
+        assertTrue("the suffixed name must keep the extension: $suffixed", suffixed.endsWith(" 2.jsonl"))
     }
 
     @Test

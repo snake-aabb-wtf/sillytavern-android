@@ -41,8 +41,17 @@ class CharacterRepository(private val engine: EngineClient) {
         val card = payload as? JsonObject
             ?: throw IllegalStateException("$PATH_GET did not return a character: $payload")
         val data = card["data"] as? JsonObject
+        val firstMes = card.string("first_mes").ifBlank { data?.string("first_mes").orEmpty() }
+        if (data == null && card.string("name").isBlank() && firstMes.isBlank()) {
+            // processCharacter() answers `{date_added:0, chat_size:0}` when the card
+            // cannot be read (characters.js:426-439). Accepting that as a valid card
+            // would create an empty chat with no explanation of what went wrong.
+            throw IllegalStateException(
+                "$PATH_GET returned an unreadable character card: $payload",
+            )
+        }
         return CharacterGreeting(
-            firstMes = card.string("first_mes").ifBlank { data?.string("first_mes").orEmpty() },
+            firstMes = firstMes,
             alternates = data?.stringList("alternate_greetings").orEmpty()
                 .ifEmpty { card.stringList("alternate_greetings") },
         )
