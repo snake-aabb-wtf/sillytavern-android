@@ -5,6 +5,7 @@ import com.sol.sillytavern.native.engine.EngineClient
 import com.sol.sillytavern.native.engine.EngineError
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -72,6 +73,15 @@ interface SettingsStore {
     suspend fun load(): ProviderConfig
 
     suspend fun save(config: ProviderConfig, apiKey: String?)
+
+    /**
+     * Whether [provider] has at least one stored secret.
+     *
+     * The form cannot read a key back, so this is the only way to tell "the user
+     * already stored a key for this provider" from "switching to this provider
+     * left it without any key at all".
+     */
+    suspend fun hasApiKey(provider: ChatProvider): Boolean
 }
 
 /**
@@ -138,6 +148,19 @@ class SettingsRepository(private val engine: EngineClient) : SettingsStore {
                 "保存未确认：服务器返回 HTTP 200 但没有 { result: \"ok\" }（$response）",
             )
         }
+    }
+
+    /**
+     * Reads the secret index and reports whether [provider] has an entry.
+     *
+     * `POST /api/secrets/read` returns `{ <secretKey>: [ { id, value: masked, ... } ] | null }`
+     * (`secrets.js:529-536`, `getSecretState`); values are masked, which is all
+     * this call needs.
+     */
+    override suspend fun hasApiKey(provider: ChatProvider): Boolean {
+        val state = post(PATH_SECRETS_READ, buildJsonObject { })
+        val values = (state as? JsonObject)?.get(provider.secretKey) as? JsonArray
+        return values != null && values.isNotEmpty()
     }
 
     /**
@@ -241,6 +264,7 @@ class SettingsRepository(private val engine: EngineClient) : SettingsStore {
         const val PATH_GET = "/api/settings/get"
         const val PATH_SAVE = "/api/settings/save"
         const val PATH_SECRETS_WRITE = "/api/secrets/write"
+        const val PATH_SECRETS_READ = "/api/secrets/read"
         const val SECRET_LABEL = "SillyTavern Android"
         const val MAX_ERROR_LINE = 200
         const val OPENROUTER_WEBSITE_MODEL = "OR_Website"

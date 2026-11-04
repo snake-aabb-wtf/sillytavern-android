@@ -1,9 +1,11 @@
 package com.sol.sillytavern.native.vm
 
+import androidx.lifecycle.viewModelScope
 import com.sol.sillytavern.native.data.model.Chat
 import com.sol.sillytavern.native.data.model.ChatMessage
 import com.sol.sillytavern.native.engine.ChatEvent
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.JsonArray
@@ -304,6 +306,93 @@ class ChatVMSendTest {
             ?.content
             .orEmpty()
         assertTrue("a new chat needs an integrity slug", integrity.isNotBlank())
+    }
+
+    @Test
+    fun leavingWhileStreamingStillPersistsTheUserLine() = runTest {
+        // System back while a reply is streaming used to cancel the whole view
+        // model scope. The user's own line is real: it must reach the file even
+        // when the screen closes before the save finishes.
+        val store = FakeStore(Chat(header, listOf(greeting)))
+        var completed = false
+        val saveGate = CompletableDeferred<Unit>()
+        store.onSave = {
+            saveGate.await()
+            completed = true
+        }
+        val never = CompletableDeferred<Unit>()
+        val vm = ChatVM(
+            AVATAR,
+            FILE,
+            store,
+            ChatTurn {
+                flow {
+                    emit(ChatEvent.Delta("Hel"))
+                    never.await()
+                }
+            },
+        )
+
+        vm.send("Hi")
+        vm.stop()
+        // What ViewModel.onCleared() does when the back stack pops the screen.
+        vm.viewModelScope.cancel()
+        saveGate.complete(Unit)
+
+        assertTrue("the stop save must survive the screen closing", completed)
+        assertTrue(
+            "the user's line must be on disk: ${store.saves.map { it.texts() }}",
+            store.saves.any { it.texts().contains("Hi") },
+        )
+    }
+
+    @Test
+    fun aSaveWaitingForTheLockSurvivesTheScreenClosing() = runTest {
+        // `saveLock.withLock` can be cancelled while it is *waiting*. A completed
+        // reply whose write is queued behind the stop-save must still land after
+        // the screen is gone.
+        val store = FakeStore(Chat(header, listOf(greeting)))
+        var saveCalls = 0
+        var secondCompleted = false
+        val firstSaveGate = CompletableDeferred<Unit>()
+        store.onSave = {
+            saveCalls++
+            if (saveCalls == 1) {
+                firstSaveGate.await()
+            } else {
+                secondCompleted = true
+            }
+        }
+        val turnGate = CompletableDeferred<Unit>()
+        val vm = ChatVM(
+            AVATAR,
+            FILE,
+            store,
+            ChatTurn { input ->
+                flow {
+                    if (input == "Hi") {
+                        emit(ChatEvent.Delta("Hel"))
+                        turnGate.await()
+                    } else {
+                        emit(ChatEvent.Delta("Answer"))
+                        emit(ChatEvent.Done)
+                    }
+                }
+            },
+        )
+
+        vm.send("Hi")
+        vm.stop() // first save holds the lock and waits on the gate
+        vm.send("Next") // its Done save queues behind that lock
+        vm.viewModelScope.cancel()
+        firstSaveGate.complete(Unit)
+
+        assertTrue("a save cancelled while waiting for the lock must still run", secondCompleted)
+        assertEquals(2, store.saves.size)
+        assertEquals(
+            listOf("Hello there.", "Hi", "Next", "Answer"),
+            store.saves.last().texts(),
+        )
     }
 
     private fun doneVm(store: ChatStore, reply: String): ChatVM = ChatVM(
