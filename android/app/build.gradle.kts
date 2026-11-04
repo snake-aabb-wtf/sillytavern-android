@@ -170,15 +170,15 @@ dependencies {
  * CI supplied a keystore that did not reach the signing config. Runs before
  * `assembleRelease` in CI (`verifyReleaseSigningConfig assembleRelease`).
  */
+val verifiedRelease = android.buildTypes.getByName("release")
 tasks.register("verifyReleaseSigningConfig") {
     doLast {
-        val release = android.buildTypes.getByName("release")
-        check(!release.isDebuggable) { "release build type must not be debuggable" }
+        check(!verifiedRelease.isDebuggable) { "release build type must not be debuggable" }
         if (releaseSigningConfigured) {
-            check(release.signingConfig != null) {
+            check(verifiedRelease.signingConfig != null) {
                 "RELEASE_KEYSTORE_BASE64 is set but the release signing config is missing"
             }
-            check(!release.signingConfig!!.storeFile!!.path.contains("debug.keystore")) {
+            check(!verifiedRelease.signingConfig!!.storeFile!!.path.contains("debug.keystore")) {
                 "release must not be signed with the debug keystore"
             }
         } else {
