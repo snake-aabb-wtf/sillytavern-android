@@ -11,6 +11,9 @@ on:
       - main
       - feature/compose-ui
   pull_request:
+    branches:
+      - main
+      - feature/compose-ui
   workflow_dispatch:
 
 permissions:
@@ -79,6 +82,14 @@ jobs:
       - name: Assert a fresh new-chat build reaches READY
         working-directory: native
         run: npm run test:new-chat
+
+      # The backend preflight must read settings.json per build: saving a
+      # provider after boot has to clear the failure in the same app process.
+      # Before that fix this test failed at the second build with the same
+      # "unsupported backend" error the user had just tried to clear.
+      - name: Assert a saved provider clears the backend preflight
+        working-directory: native
+        run: npm run test:backend-refresh
 
       # The step above runs against the unpruned checkout. Re-run the fixtures
       # against a copy pruned by the same script staging uses, so an asset that

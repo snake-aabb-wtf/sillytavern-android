@@ -20,11 +20,10 @@ import { assertSupportedBackend } from '../prompt-builder/index.mjs';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const KOBOLD_SETTINGS = path.join(HERE, '../../.github/ci/fixtures/settings-kobold.json');
 
-test('the koboldhorde seed fails fast with the backend name and the fix', () => {
+test('the koboldhorde seed is rejected with the backend name and the fix', () => {
     const settings = JSON.parse(fs.readFileSync(KOBOLD_SETTINGS, 'utf8'));
     assert.equal(settings.main_api, 'koboldhorde', 'the fixture must pin the seeded default');
 
-    const startedAt = Date.now();
     assert.throws(
         () => assertSupportedBackend(settings.main_api),
         error => {
@@ -35,7 +34,19 @@ test('the koboldhorde seed fails fast with the backend name and the fix', () => 
             return true;
         },
     );
-    assert.ok(Date.now() - startedAt < 5000, 'the preflight must not wait for a timeout');
+});
+
+test('a stale client snapshot points at a restart, not another save', () => {
+    // Reached only when settings.json already selects openai but the running
+    // client still holds its boot-time value: saving again cannot clear it.
+    assert.throws(
+        () => assertSupportedBackend('koboldhorde', { onDisk: 'openai' }),
+        error => {
+            assert.match(error.message, /restart the app/);
+            assert.doesNotMatch(error.message, /save a provider/);
+            return true;
+        },
+    );
 });
 
 test('openai is the supported backend', () => {

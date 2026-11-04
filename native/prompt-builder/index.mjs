@@ -34,21 +34,41 @@ const DEFAULT_SERVER_DIR = path.resolve(HERE, '../../SillyTavern');
 export const GENERATE_PATH = '/api/backends/chat-completions/generate';
 
 /**
+ * Reads `main_api` from the user's settings file. This is the effective
+ * backend: saving a provider through the app writes this file, while the
+ * jsdom client keeps the value it read during page initialisation.
+ */
+export function readSettingsMainApi(dataDir) {
+    const settingsPath = path.join(dataDir, 'default-user', 'settings.json');
+    try {
+        const raw = fs.readFileSync(settingsPath, 'utf8').replace(/^\uFEFF/, '');
+        const parsed = JSON.parse(raw);
+        return typeof parsed.main_api === 'string' ? parsed.main_api : null;
+    } catch {
+        return null;
+    }
+}
+
+/**
  * The headless builder can only reproduce an OpenAI-compatible send. The seeded
  * settings default to `main_api: "koboldhorde"`; Generate() then never posts to
  * the chat-completions route, and build() would wait out its whole 180 s timeout
  * on the very first message of a fresh install. Fail before the send instead,
- * with the backend name and the screen that fixes it.
+ * with the backend name and the action that actually clears it.
+ *
+ * `onDisk` is the value build() re-read from settings.json. When it already says
+ * `openai` but the page still has another value, saving again cannot help: only
+ * a restart reloads the client's boot-time snapshot, and the message says so.
  *
  * Exported so the preflight can be unit-tested without booting jsdom.
  */
-export function assertSupportedBackend(mainApi) {
+export function assertSupportedBackend(mainApi, { onDisk } = {}) {
     if (mainApi === 'openai') return;
     const current = mainApi || '(not set)';
-    throw new Error(
-        `build(): unsupported backend ${JSON.stringify(current)}; ` +
-        'open 设置 and save a provider (OpenAI 兼容 / OpenRouter / OpenAI 官方)',
-    );
+    const action = onDisk === 'openai'
+        ? 'settings.json now selects openai, but the running app still uses the old value; restart the app to apply it'
+        : 'open 设置 and save a provider (OpenAI 兼容 / OpenRouter / OpenAI 官方)';
+    throw new Error(`build(): unsupported backend ${JSON.stringify(current)}; ${action}`);
 }
 export const STATUS_PATH = '/api/backends/chat-completions/status';
 
@@ -322,6 +342,32 @@ export async function createBuilder({ dataDir, port, serverDir = DEFAULT_SERVER_
         return st.getContext();
     };
 
+    /**
+     * The backend build() should dispatch on.
+     *
+     * `ctx().mainApi` is a boot-time snapshot: the client reads settings once
+     * while the page initialises, and the builder is warmed at server start and
+     * reused for the whole app process. A provider saved since then exists only
+     * in settings.json, so reading the snapshot alone would tell the user to do
+     * the thing they just did, forever. Read the file per build and, when it
+     * disagrees, make the client re-read its settings once before deciding.
+     */
+    async function resolveEffectiveBackend() {
+        const onDisk = readSettingsMainApi(dataDir);
+        const cached = ctx().mainApi;
+        if (!onDisk || onDisk === cached) return { mainApi: cached, onDisk };
+
+        const getSettings = host.app?.getSettings;
+        if (typeof getSettings !== 'function') return { mainApi: cached, onDisk };
+        try {
+            await getSettings();
+        } catch (error) {
+            log(`[builder] settings refresh failed: ${error?.message || error}`);
+            return { mainApi: cached, onDisk };
+        }
+        return { mainApi: ctx().mainApi, onDisk };
+    }
+
     async function ensureOnline() {
         const context = ctx();
         if (context.onlineStatus && context.onlineStatus !== 'no_connection') return;
@@ -354,8 +400,10 @@ export async function createBuilder({ dataDir, port, serverDir = DEFAULT_SERVER_
      * `chat_metadata` and extension-prompt state. This mirrors the state part
      * of getChat()/getChatResult() (script.js:7634-7710) and skips the render.
      *
-     * Returns false when the chat has no messages, so the caller can fall back
-     * to the full client path (which materialises the first message).
+     * Returns `{ applied: false }` when the chat has no messages, so the caller
+     * can fall back to the full client path (which materialises the first
+     * message). The fetched header travels with the result: it is the identity
+     * the reloaded state must match.
      */
     async function loadChatState({ character, index, fileName }) {
         const startedAt = performance.now();
@@ -373,8 +421,7 @@ export async function createBuilder({ dataDir, port, serverDir = DEFAULT_SERVER_
         if (!response.ok) throw new Error(`POST /api/chats/get failed (${response.status})`);
         const data = await response.json();
         const fetchedAt = performance.now();
-        if (!Array.isArray(data) || data.length === 0) return false;
-
+        if (!Array.isArray(data) || data.length === 0) return { applied: false, header: null };
         const header = data.shift() ?? {};
         const nextMetadata = header.chat_metadata && typeof header.chat_metadata === 'object'
             ? header.chat_metadata
@@ -425,7 +472,59 @@ export async function createBuilder({ dataDir, port, serverDir = DEFAULT_SERVER_
         log(`[builder] chat load (ms): fetch=${Math.round(fetchedAt - startedAt)} ` +
             `apply=${Math.round(appliedAt - fetchedAt)} events=${Math.round(eventsAt - appliedAt)} ` +
             `notify=${notify} messages=${data.length}`);
-        return true;
+        return { applied: true, header };
+    }
+
+    /**
+     * Fails when the client's live chat is not the one build() asked for.
+     *
+     * `character.chat` and `lastChatKey` are values this builder set itself, so
+     * they cannot prove the reload happened. The chat file's integrity (written
+     * by NewChatService and by the client on first save) and the message list
+     * are read from the requested file, and both must appear live.
+     */
+    function assertRequestedChatApplied({ expectedMetadata, fileName, greeting }) {
+        const context = ctx();
+        const expectedIntegrity = expectedMetadata?.integrity;
+        const liveIntegrity = context.chatMetadata?.integrity;
+        if (expectedIntegrity && liveIntegrity !== expectedIntegrity) {
+            throw new Error(
+                `build(): the chat reload did not apply ${JSON.stringify(fileName)}; ` +
+                `chat_metadata.integrity is ${JSON.stringify(liveIntegrity ?? null)} but the file has ` +
+                `${JSON.stringify(expectedIntegrity)}; refusing to build from the previous chat state`,
+            );
+        }
+
+        const currentId = typeof context.getCurrentChatId === 'function'
+            ? context.getCurrentChatId()
+            : undefined;
+        if (currentId && fileName && currentId !== fileName) {
+            throw new Error(
+                `build(): the client is on chat ${JSON.stringify(currentId)}, not ${JSON.stringify(fileName)}; ` +
+                'refusing to build from the previous chat state',
+            );
+        }
+
+        // Older chats have no integrity, so compare the rest of the header too.
+        // normalizeManifest drops the fields the client legitimately rewrites.
+        if (expectedMetadata && !sameManifest(expectedMetadata, context.chatMetadata)) {
+            throw new Error(
+                `build(): chat_metadata for ${JSON.stringify(fileName)} does not match the file; ` +
+                'refusing to build from the previous chat state',
+            );
+        }
+
+        const messages = Array.isArray(context.chat) ? context.chat : [];
+        // The requested file was header-only, so a successful reload leaves the
+        // materialised greeting (one message) or nothing at all. Any other
+        // length is the previous chat's transcript.
+        const expected = greeting ? 1 : 0;
+        if (messages.length !== expected) {
+            throw new Error(
+                `build(): ${JSON.stringify(fileName)} loaded ${messages.length} message(s), expected ${expected}; ` +
+                'refusing to build from the previous chat state',
+            );
+        }
     }
 
     /**
@@ -462,8 +561,10 @@ export async function createBuilder({ dataDir, port, serverDir = DEFAULT_SERVER_
         mark('characters');
         // A fresh install seeds main_api: koboldhorde; Generate() would then
         // never reach the chat-completions route and the first send would hang
-        // for the full 180 s timeout. Reject it before touching the UI.
-        assertSupportedBackend(ctx().mainApi);
+        // for the full 180 s timeout. Reject it before touching the UI, using
+        // the value on disk (the client's snapshot is from page boot).
+        const backend = await resolveEffectiveBackend();
+        assertSupportedBackend(backend.mainApi, { onDisk: backend.onDisk });
         await ensureOnline();
         mark('online');
 
@@ -516,36 +617,35 @@ export async function createBuilder({ dataDir, port, serverDir = DEFAULT_SERVER_
             // reply between turns and the restored in-memory array would
             // silently drop it.
             const loaded = await loadChatState({ character, index, fileName });
-            if (!loaded) {
+            if (!loaded.applied) {
                 // Empty chat: the real path materialises the greeting; keep it
                 // (and its save) rather than inventing a different history.
-                // Prefer the unsafe variant when a client exposes it: the mutex-
-                // wrapped version can return immediately when another reload holds
-                // the mutex, leaving the previous chat's messages in place.
-                const reload = typeof ctx().reloadCurrentChatUnsafe === 'function'
-                    ? ctx().reloadCurrentChatUnsafe
-                    : ctx().reloadCurrentChat;
+                //
+                // reloadCurrentChatUnsafe is exported by upstream but is not on
+                // getContext() (scripts/st-context.js), so it is unreachable
+                // here; the mutex-wrapped reload is the only available path.
+                const reload = ctx().reloadCurrentChat;
                 if (typeof reload !== 'function') throw new Error('reloadCurrentChat is not available; cannot reload the chat for this turn');
                 await reload();
                 lastChatKey = `${index}:${fileName}`;
                 lastChatManifest = normalizeManifest(ctx().chatMetadata);
-                chatStateGeneration += 1;
 
-                // Post-condition: a card with an opening message must leave one
-                // in the chat after the reload. Building from the previous chat's
-                // history silently sends the wrong prompt, which is worse than
-                // failing this turn.
+                // Post-condition: the live state must be the chat that was
+                // requested, not whatever the previous turn left behind. A
+                // no-op reload (mutex held, stale marker) used to pass when the
+                // card simply had no greeting; the file's integrity and the
+                // resulting message list identify the chat unambiguously.
                 const liveCard = ctx().characters?.[index] ?? character;
                 const greeting = liveCard?.first_mes
                     || liveCard?.data?.first_mes
                     || liveCard?.data?.alternate_greetings?.[0]
                     || '';
-                if (greeting && ctx().chat.length === 0) {
-                    throw new Error(
-                        'build(): the chat reload did not apply the new chat; ' +
-                        'refusing to build from the previous chat state',
-                    );
-                }
+                assertRequestedChatApplied({
+                    expectedMetadata: loaded.header?.chat_metadata,
+                    fileName,
+                    greeting,
+                });
+                chatStateGeneration += 1;
             }
             mark('chat');
         } else {
